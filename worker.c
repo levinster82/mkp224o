@@ -73,7 +73,7 @@ char *makesname(void)
 	return sname;
 }
 
-static void onionready(char *sname,const u8 *secret,const u8 *pubonion,int warnnear)
+void onionready(char *sname,const u8 *secret,const u8 *pubonion,int warnnear)
 {
 	if (endwork)
 		return;

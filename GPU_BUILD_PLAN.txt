@@ -1,0 +1,282 @@
+GPU ACCELERATION BUILD PLAN
+mkp224o — ed25519 onion vanity address generator
+=================================================
+
+
+OVERVIEW
+--------
+Add NVIDIA CUDA GPU support as an optional build target via --enable-cuda.
+The GPU mirrors the existing worker_batch algorithm at massive scale, with
+parameters auto-tuned at both build time (architecture targeting) and runtime
+(thread count, batch size) based on the detected GPU.
+
+
+BACKGROUND: WHY THE DESIGN IS THIS WAY
+---------------------------------------
+The hot path per candidate:
+  1. ge_add with ge_eightpoint          ~9 fe_mul
+  2. fe_invert (for tobytes/filter)   ~231 fe_mul  ← dominant cost
+  3. fe_tobytes + filter check          ~1 fe_mul
+
+The CPU beats the inversion cost with fe_batchinvert (Montgomery batch trick)
+across BATCHNUM=2048 points, amortizing inversion to ~3 fe_mul per point.
+Total per candidate on CPU: ~12 fe_mul.
+
+Individual GPU inversions would cost 231 fe_mul per candidate — 19x worse.
+The design must replicate the batch inversion at GPU scale to be competitive.
+
+Inversion cost by batch size:
+  N=1   (individual):  231.0 fe_mul/point   — 19x overhead, rejected
+  N=32  (warp batch):   10.2 fe_mul/point   — complex, marginal gain
+  N=128 (thread batch):  4.8 fe_mul/point   — chosen: simple + effective
+  N=256 (thread batch):  3.9 fe_mul/point   — needs more VRAM
+  N=2048 (CPU default):  3.1 fe_mul/point   — CPU reference
+
+
+CORE ARCHITECTURE
+-----------------
+Each GPU thread runs an independent copy of the worker_batch loop:
+  - Current ge_p3 point kept in registers (160 bytes, ~40 int32 registers)
+  - BATCHNUM_GPU ge_p3 points accumulated in pre-allocated global memory
+  - After BATCHNUM_GPU steps: fe_batchinvert own Z array, tobytes, check filter
+  - On match: compute Keccak checksum, write to result ring buffer
+  - CPU drains result buffer and writes key files
+
+No cross-thread coordination during the main loop.
+ge_eightpoint and filter table stored in __constant__ memory (broadcast cache).
+
+Global memory layout — CRITICAL for bandwidth:
+  buffer[step][thread_id]   NOT   buffer[thread_id][step]
+
+The [step][thread_id] layout makes each warp's access to buffer[step][*]
+contiguous in memory (coalesced), saturating memory bandwidth instead of
+serializing it (32 threads × 160 bytes = 5120 bytes per coalesced transaction).
+
+
+BUILD-TIME TUNING: ARCHITECTURE TARGETING
+------------------------------------------
+The configure script runs a small CUDA probe program that queries
+cudaGetDeviceProperties() and prints the GPU's compute capability (major.minor).
+
+Configure then emits the correct -gencode flags for nvcc:
+  Detected GPU:   -gencode arch=compute_XY,code=sm_XY
+                  -gencode arch=compute_XY,code=compute_XY  (PTX fallback)
+
+If no GPU is present at build time (--enable-cuda but no device):
+  Falls back to a multi-arch fat binary covering common capabilities:
+    sm_61 (Pascal,  GTX 10xx)
+    sm_75 (Turing,  GTX/RTX 16xx, RTX 20xx)
+    sm_80 (Ampere,  A100)
+    sm_86 (Ampere,  RTX 30xx)
+    sm_89 (Ada,     RTX 40xx)
+    sm_90 (Hopper,  H100)
+  Plus a PTX fallback for future architectures.
+
+Manual override: --with-cuda-arch=86 (useful for cross-compilation).
+
+
+RUNTIME TUNING: PARAMETER AUTO-CONFIGURATION
+---------------------------------------------
+gpu_autoconf() runs at startup before kernel launch, queries the live GPU,
+and returns a struct gpu_config:
+
+  struct gpu_config {
+      int    num_blocks;        // total blocks to launch
+      int    threads_per_block; // threads per block
+      int    batchnum;          // BATCHNUM_GPU, selects kernel template
+      size_t vram_budget;       // bytes allocated for batch buffers
+  };
+
+Parameters computed from cudaGetDeviceProperties():
+
+  multiProcessorCount
+    -> num_blocks = SMs * blocks_per_SM
+       blocks_per_SM chosen to keep GPU saturated (typically 2-4)
+
+  totalGlobalMem
+    -> vram_budget = totalGlobalMem * 0.6  (leave headroom)
+    -> batchnum = vram_budget / (num_threads * (sizeof(ge_p3) + sizeof(fe)))
+       clamped to [64, 2048], rounded to nearest power of 2
+
+  regsPerBlock + major/minor (compute capability)
+    -> threads_per_block: 256 for Ampere (sm_8x), adjust for others
+       must be multiple of warpSize (32)
+       constrained so register use stays within regsPerBlock
+
+Example output (RTX 3070, sm_86):
+  GPU: NVIDIA GeForce RTX 3070 (sm_86, 46 SMs, 8192 MB)
+  GPU config: 368 blocks x 256 threads = 94208 threads, batchnum=128
+
+Example output (RTX 4090, sm_89):
+  GPU: NVIDIA GeForce RTX 4090 (sm_89, 128 SMs, 24576 MB)
+  GPU config: 1024 blocks x 256 threads = 262144 threads, batchnum=512
+
+Output suppressed with -q flag.
+
+
+BATCHNUM TEMPLATE DISPATCH
+---------------------------
+BATCHNUM must be a compile-time constant for the compiler to unroll the inner
+accumulation loop. But the value is selected at runtime. Solution: compile
+a fixed set of template instantiations and dispatch at startup.
+
+Kernel template:
+  template<int B>
+  __global__ void worker_cuda_kernel(struct kernel_args args) { ... }
+
+Explicit instantiations compiled into worker_cuda.cu:
+  template __global__ void worker_cuda_kernel<  64>(struct kernel_args);
+  template __global__ void worker_cuda_kernel< 128>(struct kernel_args);
+  template __global__ void worker_cuda_kernel< 256>(struct kernel_args);
+  template __global__ void worker_cuda_kernel< 512>(struct kernel_args);
+  template __global__ void worker_cuda_kernel<1024>(struct kernel_args);
+
+Runtime dispatch in gpu_autoconf.cu:
+  switch (cfg.batchnum) {
+      case   64: worker_cuda_kernel<  64><<<...>>>(args); break;
+      case  128: worker_cuda_kernel< 128><<<...>>>(args); break;
+      case  256: worker_cuda_kernel< 256><<<...>>>(args); break;
+      case  512: worker_cuda_kernel< 512><<<...>>>(args); break;
+      case 1024: worker_cuda_kernel<1024><<<...>>>(args); break;
+  }
+
+
+FILES TO CREATE
+---------------
+ed25519/cuda/fe_cuda.cuh
+  - ref10 field arithmetic as __device__ __forceinline__ functions
+  - fe_mul, fe_sq, fe_sq2, fe_add, fe_sub, fe_neg, fe_invert
+  - fe_tobytes, fe_frombytes, fe_copy, fe_0, fe_1, fe_cmov
+  - fe_batchinvert: Montgomery batch trick operating on strided global memory
+  - Same 10-limb int32 representation as ref10; 64-bit accumulators in registers
+  - No shared memory; all computation stays in registers
+
+ed25519/cuda/ge_cuda.cuh
+  - ge_p3, ge_p1p1, ge_precomp, ge_cached struct definitions
+  - ge_add, ge_madd, ge_p1p1_to_p3 as __device__ __forceinline__
+  - ge_p3_tobytes as __device__ __forceinline__
+  - __constant__ ge_cached cuda_ge_eightpoint  (initialized at startup)
+
+keccak_cuda.cuh
+  - SHA3-256 as a __device__ __forceinline__ function
+  - Pure integer arithmetic; direct port of keccak.c
+  - No dynamic allocation; all state in local registers/array
+
+gpu_autoconf.cu
+  - gpu_autoconf(): queries cudaGetDeviceProperties, computes struct gpu_config
+  - gpu_init(): allocates global memory buffers, copies ge_eightpoint to
+    __constant__ memory, initializes result ring buffer
+  - gpu_cleanup(): frees allocations
+  - gpu_getresults(): drains result ring buffer into caller-provided array
+
+worker_cuda.cu
+  - worker_cuda_kernel<B> template: the main GPU kernel
+      * persistent loop (no kernel relaunch overhead)
+      * ge_add inner loop accumulating ge_p3 into global buffer
+      * fe_batchinvert pass after B steps
+      * filter check (INTFILTER / BINFILTER / PCRE2FILTER via same macros)
+      * on match: Keccak, atomic write to result ring buffer
+  - Explicit template instantiations for B in {64,128,256,512,1024}
+  - gpu_worker_launch(): called from main.c instead of pthread_create
+    when CUDA is enabled; starts the persistent kernel and a CPU drain thread
+
+configure.ac changes
+  - AC_ARG_ENABLE([cuda], ...)
+  - AC_ARG_WITH([cuda-path], ...) for non-standard CUDA installs
+  - AC_ARG_WITH([cuda-arch], ...) for manual architecture override
+  - CUDA probe program: compiles and runs a minimal cudaGetDeviceProperties
+    query; extracts major/minor; sets CUDA_ARCH and CUDA_GENCODE_FLAGS
+  - Fallback multi-arch CUDA_GENCODE_FLAGS if probe fails
+  - Substitute NVCC, CUDA_CFLAGS, CUDA_LDFLAGS, CUDA_GENCODE_FLAGS
+
+GNUmakefile.in changes
+  - NVCC = @NVCC@
+  - CUDA_CFLAGS = @CUDA_CFLAGS@
+  - CUDA_LDFLAGS = @CUDA_LDFLAGS@ (-lcudart)
+  - CUDA_GENCODE_FLAGS = @CUDA_GENCODE_FLAGS@
+  - Pattern rule: %.cu.o: %.cu
+        $(NVCC) $(CUDA_GENCODE_FLAGS) $(CUDA_CFLAGS) -c -o $@ $<
+  - Conditional inclusion of GPU object files when CUDA enabled
+  - Link with $(CUDA_LDFLAGS) when CUDA enabled
+
+
+FILES TO MODIFY
+---------------
+main.c
+  - When CUDA enabled and no --passphrase: call gpu_worker_launch() instead
+    of the pthread worker loop
+  - gpu_worker_launch() is blocking (runs until endwork=1), drains results,
+    writes key files via existing onionready() path
+  - Statistics reporting hooks into gpu_getresults() counters
+
+worker.h / common.h
+  - No changes needed; GPU worker uses same filter macros and global state
+
+
+WHAT IS NOT PORTED TO GPU
+--------------------------
+ge_scalarmult_base
+  - Expensive (~2000 fe_mul) but called once per epoch per thread on CPU
+  - CPU computes one starting ge_p3 per epoch, ships to GPU via cudaMemcpy
+  - Negligible overhead: 1 CPU scalarmult per (BATCHNUM * num_gpu_threads) candidates
+
+PASSPHRASE / deterministic mode
+  - Deterministic seed advancement requires strict ordering; GPU threads are
+    unordered. Keep passphrase mode on CPU only.
+  - --passphrase flag silently disables CUDA and falls back to CPU workers.
+
+YAML output (-y)
+  - Key serialization happens on CPU after GPU returns a match; no change needed.
+
+
+DESIGN DECISIONS EXPLICITLY REJECTED
+--------------------------------------
+Warp-shuffle batch inversion
+  - 32-thread warp batch costs 10.2 fe_mul/point vs 4.8 for thread-local batch
+  - Complex __shfl_sync code for marginal benefit; rejected
+
+Shared memory for batch buffers
+  - Would limit BATCHNUM to ~300 entries total per block (48KB shared / 160 bytes)
+  - Coalesced global memory access with [step][thread_id] layout is better
+
+donna 64-bit field arithmetic
+  - 64-bit integer multiply is emulated on CUDA (2 instructions vs 1 for 32-bit)
+  - ref10 32-bit is equal or faster; simpler to port
+
+OpenCL
+  - 20-30% slower than CUDA on NVIDIA hardware; not worth the portability cost
+  - Can be added later as a separate backend if needed
+
+
+BUILD INVOCATION
+----------------
+With GPU auto-detected:
+  ./configure --enable-cuda
+  make
+
+With manual architecture (e.g. for a machine without a GPU at build time):
+  ./configure --enable-cuda --with-cuda-arch=86
+  make
+
+With custom CUDA install path:
+  ./configure --enable-cuda --with-cuda-path=/usr/local/cuda-12.0
+  make
+
+CPU-only (default, unchanged):
+  ./configure
+  make
+
+
+EXPECTED PERFORMANCE
+--------------------
+Estimates vs. CPU (8-thread Ryzen 7 / Intel Core i7 class):
+
+  RTX 3060 (28 SMs):   15-30x faster than 8-thread CPU
+  RTX 3070 (46 SMs):   25-50x faster
+  RTX 3080 (68 SMs):   35-70x faster
+  RTX 3090 (82 SMs):   45-90x faster
+  RTX 4090 (128 SMs): 70-140x faster
+
+Range reflects filter length (shorter filters match more often, reducing the
+relative weight of the inversion cost and slightly reducing GPU advantage).
+Actual numbers depend on memory bandwidth, clock speed, and driver overhead.

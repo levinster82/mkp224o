@@ -42,6 +42,7 @@ extern int pw_warnnear;
 extern void worker_init(void);
 
 extern char *makesname(void);
+extern void onionready(char *sname, const u8 *secret, const u8 *pubonion, int warnnear);
 extern size_t worker_batch_memuse(void);
 
 extern void *CRYPTO_NAMESPACE(worker_batch)(void *task);

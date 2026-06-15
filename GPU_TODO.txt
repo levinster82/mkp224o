@@ -1,0 +1,75 @@
+GPU ACCELERATION — TODO LIST
+mkp224o CUDA implementation
+============================
+
+STATUS: Code written, CPU build verified clean. Not yet tested on GPU hardware.
+
+
+REQUIRED BEFORE MERGE TO MASTER
+---------------------------------
+
+[ ] First-run test on real GPU hardware
+    - ./configure --enable-cuda && make
+    - Run: ./mkp224o -f test
+    - Verify produced onion addresses are valid (Tor accepts them)
+    - Check stderr output: GPU name, SM count, batchnum selected
+
+[ ] Fix ring buffer overflow for common patterns
+    - Current: 1024-slot ring with no backpressure; if ring fills before CPU
+      drains it, new match overwrites an unread slot (silent corruption)
+    - Likely to happen with very short filters (1-3 chars) where matches
+      are frequent and the drain thread (1ms poll) can't keep up
+    - Fix: before writing to slot, spin on done[slot]==0; or increase ring
+      to 8192 and document the limit
+
+[ ] Verify secret key format is Tor-compatible
+    - CPU uses SHA-512(seed) to derive sk[0..63] (proper ed25519 expansion)
+    - GPU uses random[0..63] + clamp (sk[32..63] are random, not SHA-512 derived)
+    - sk[32..63] is used as signing nonce material; random bytes are secure
+      but Tor should be checked to confirm it accepts the expanded key format
+      regardless of how sk[32..63] was derived
+    - Test: import a GPU-generated key into Tor and verify the service comes up
+
+
+KNOWN LIMITATIONS (deferred, document in README)
+-------------------------------------------------
+
+[ ] numwords > 1 falls back to CPU
+    - Multi-word patterns (-f a -f b) require shiftpk which is not
+      implemented in the GPU kernel
+    - Currently: falls back to CPU with a message, no silent wrong results
+    - Future: implement shiftpk equivalent in CUDA
+
+[ ] PASSPHRASE / deterministic mode is CPU-only
+    - Strict ordering requirement incompatible with GPU parallelism
+    - Currently: --passphrase silently uses CPU regardless of --enable-cuda
+    - No fix planned; this is by design
+
+[ ] No GPU throughput statistics
+    - The -s flag and keysgenerated display do not reflect GPU work
+    - Fix: increment keysgenerated in drain thread (already calls onionready
+      which does this), but numcalc (candidates tested) is not tracked at all
+    - Add an atomic counter in the kernel, copy to host periodically
+
+
+NICE TO HAVE
+------------
+
+[ ] Multi-GPU support
+    - Current: always uses device 0
+    - Fix: loop over cudaGetDeviceCount(), launch one kernel per device,
+      one drain thread per device
+
+[ ] Reload starting points after epoch
+    - Current: each thread has one fixed starting ge_p3 computed at launch;
+      counter advances indefinitely from there
+    - If counter wraps the scalar group order (~2^252), points repeat
+    - In practice ~2^252 / (94208 threads * 8 steps/iter) iterations before
+      wrap = astronomically large; not a real concern
+
+[ ] cudaDeviceReset on unclean exit
+    - SIGKILL or crash leaves GPU in bad state until process exits
+    - Minor: OS reclaims GPU resources on process exit anyway
+
+[ ] Test with --with-cuda-arch manual override
+    - Cross-compilation path (build on machine without GPU) not tested

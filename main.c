@@ -29,6 +29,10 @@
 
 #include "worker.h"
 
+#ifdef USE_CUDA
+#include "worker_cuda.h"
+#endif
+
 #include "likely.h"
 
 #ifndef _WIN32
@@ -651,6 +655,29 @@ int main(int argc,char **argv)
 
 	signal(SIGTERM,termhandler);
 	signal(SIGINT,termhandler);
+
+#ifdef USE_CUDA
+#ifdef PASSPHRASE
+	if (!deterministic)
+#endif
+	{
+		if (numwords > 1) {
+			if (!quietflag)
+				fprintf(stderr,"GPU: multi-word patterns not supported, using CPU\n");
+			goto cpu_workers;
+		}
+		// GPU mode: replaces the CPU thread pool
+		if (!quietflag)
+			fprintf(stderr,"using GPU acceleration\n");
+		int gret = gpu_worker_launch(quietflag);
+		if (gret < 0) {
+			fprintf(stderr,"GPU launch failed, falling back to CPU\n");
+			goto cpu_workers;
+		}
+		goto done;
+	}
+cpu_workers:
+#endif // USE_CUDA
 
 	VEC_INIT(threads);
 	VEC_ADDN(threads,numthreads);

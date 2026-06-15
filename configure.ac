@@ -372,6 +372,91 @@ yes|pcre2)
 esac
 
 
+## CUDA support
+NVCC=""
+CUDA_CFLAGS=""
+CUDA_LDFLAGS=""
+CUDA_GENCODE_FLAGS=""
+ENABLE_CUDA=0
+
+AC_ARG_ENABLE([cuda],
+    [AS_HELP_STRING([--enable-cuda], [enable NVIDIA CUDA GPU acceleration @<:@default=no@:>@])],
+    [], [enable_cuda=no]
+)
+
+AC_ARG_WITH([cuda-path],
+    [AS_HELP_STRING([--with-cuda-path=PATH],
+        [path to CUDA toolkit (e.g. /usr/local/cuda) @<:@default=auto@:>@])],
+    [], [with_cuda_path=""]
+)
+
+AC_ARG_WITH([cuda-arch],
+    [AS_HELP_STRING([--with-cuda-arch=XY],
+        [target CUDA compute capability, e.g. 86 for sm_86 @<:@default=auto@:>@])],
+    [], [with_cuda_arch=""]
+)
+
+AS_IF([test x"$enable_cuda" = x"yes"], [
+    # Locate nvcc
+    AS_IF([test -n "$with_cuda_path"],
+        [NVCC="$with_cuda_path/bin/nvcc"],
+        [AC_PATH_PROG([NVCC], [nvcc], [])]
+    )
+
+    AS_IF([test -z "$NVCC" -o ! -x "$NVCC"], [
+        AC_MSG_ERROR([nvcc not found; install CUDA toolkit or use --with-cuda-path=])
+    ])
+
+    CUDA_TOOLKIT_ROOT=`"$NVCC" --version 2>/dev/null | true`
+    AS_IF([test -n "$with_cuda_path"],
+        [CUDA_CFLAGS="-I$with_cuda_path/include"
+         CUDA_LDFLAGS="-L$with_cuda_path/lib64 -lcudart"],
+        [CUDA_LDFLAGS="-lcudart"]
+    )
+
+    # Determine gencode flags
+    AS_IF([test -n "$with_cuda_arch"], [
+        # Manual architecture override
+        CUDA_GENCODE_FLAGS="-gencode arch=compute_${with_cuda_arch},code=sm_${with_cuda_arch} -gencode arch=compute_${with_cuda_arch},code=compute_${with_cuda_arch}"
+        AC_MSG_NOTICE([CUDA target: sm_${with_cuda_arch} (manual)])
+    ], [
+        # Probe for the installed GPU's compute capability
+        AC_MSG_CHECKING([CUDA device compute capability])
+        cat > conftest_cuda_probe.cu << 'CUDA_PROBE_EOF'
+#include <stdio.h>
+#include <cuda_runtime.h>
+int main(void) {
+    cudaDeviceProp p;
+    if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) return 1;
+    printf("%d%d\n", p.major, p.minor);
+    return 0;
+}
+CUDA_PROBE_EOF
+        cuda_cap=""
+        if "$NVCC" -o conftest_cuda_probe conftest_cuda_probe.cu 2>/dev/null; then
+            cuda_cap=`./conftest_cuda_probe 2>/dev/null`
+        fi
+        rm -f conftest_cuda_probe conftest_cuda_probe.cu
+
+        AS_IF([test -n "$cuda_cap"], [
+            CUDA_GENCODE_FLAGS="-gencode arch=compute_${cuda_cap},code=sm_${cuda_cap} -gencode arch=compute_${cuda_cap},code=compute_${cuda_cap}"
+            AC_MSG_RESULT([sm_${cuda_cap}])
+        ], [
+            # Fallback: multi-arch fat binary covering Pascal through Hopper
+            CUDA_GENCODE_FLAGS="-gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90"
+            AC_MSG_RESULT([not detected, using multi-arch fat binary])
+        ])
+    ])
+
+    ENABLE_CUDA=1
+])
+
+AC_SUBST(NVCC,["$NVCC"])
+AC_SUBST(CUDA_CFLAGS,["$CUDA_CFLAGS"])
+AC_SUBST(CUDA_LDFLAGS,["$CUDA_LDFLAGS"])
+AC_SUBST(CUDA_GENCODE_FLAGS,["$CUDA_GENCODE_FLAGS"])
+AC_SUBST(ENABLE_CUDA,["$ENABLE_CUDA"])
+
 AC_MSG_CHECKING([whether ARGON2ID13 is supported by libsodium])
 AC_COMPILE_IFELSE(
 	[AC_LANG_PROGRAM(

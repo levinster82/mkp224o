@@ -6,6 +6,12 @@ ASFLAGS= @PIE@
 LDFLAGS= @LDFLAGS@
 MV= mv
 
+NVCC= @NVCC@
+CUDA_CFLAGS= @CUDA_CFLAGS@
+CUDA_LDFLAGS= @CUDA_LDFLAGS@
+CUDA_GENCODE_FLAGS= @CUDA_GENCODE_FLAGS@
+ENABLE_CUDA= @ENABLE_CUDA@
+
 ED25519_DEFS= -DED25519_ref10 -DED25519_amd64_51_30k -DED25519_amd64_64_24k -DED25519_donna
 ED25519_ref10= $(patsubst @SRCDIR@/%.c,%.c.o,$(wildcard @SRCDIR@/ed25519/ref10/*.c))
 ED25519_amd64_51_30k= \
@@ -16,6 +22,20 @@ ED25519_amd64_64_24k= \
 	$(patsubst @SRCDIR@/%.S,%.S.o,$(wildcard @SRCDIR@/ed25519/amd64-64-24k/*.S))
 ED25519_donna=
 ED25519_OBJ= $(ED25519_@ED25519IMPL@)
+
+ifeq ($(ENABLE_CUDA),1)
+# Separate compilation: each .cu.o is relocatable device code (-dc).
+# cuda_dlink.o is the device-link step that resolves cross-file __constant__ refs.
+CUDA_OBJ= gpu_autoconf.cu.o worker_cuda.cu.o cuda_dlink.o
+CUDA_DEFS= -DUSE_CUDA
+# GPU starting-point generation always uses ref10 field arithmetic.
+# Add ref10 objects only if they are not already part of ED25519_OBJ.
+CUDA_REF10_OBJ= $(filter-out $(ED25519_OBJ),$(ED25519_ref10))
+else
+CUDA_OBJ=
+CUDA_DEFS=
+CUDA_REF10_OBJ=
+endif
 
 MAIN_OBJ= \
 	main.c.o \
@@ -29,7 +49,9 @@ MAIN_OBJ= \
 	base64_from.c.o \
 	ioutil.c.o \
 	$(ED25519_OBJ) \
-	keccak.c.o
+	$(CUDA_REF10_OBJ) \
+	keccak.c.o \
+	$(CUDA_OBJ)
 
 UTIL_CALCEST_OBJ= \
 	calcest.c.o
@@ -69,7 +91,7 @@ ALL_O= $(sort \
 ALL_C= $(patsubst %.c.o,%.c,$(filter %.c.o %.c,$(ALL_O)))
 CLEAN_O= $(filter %.o,$(ALL_O))
 
-MAIN_LIB= -lpthread -lsodium @MAINLIB@
+MAIN_LIB= -lpthread -lsodium @MAINLIB@ $(CUDA_LDFLAGS)
 UTIL_CALCEST_LIB= -lm
 TEST_ED25519_LIB= -lsodium
 
@@ -96,7 +118,7 @@ util: $(UTIL_EXE)
 test: $(TEST_EXE)
 
 mkp224o@EXEEXT@: $(MAIN_OBJ)
-	$(CC) $(LDFLAGS) $(CFLAGS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
+	$(CC) $(LDFLAGS) $(CFLAGS) $(CUDA_DEFS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
 
 calcest@EXEEXT@: $(UTIL_CALCEST_OBJ)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@.tmp $^ $(UTIL_CALCEST_LIB) && $(MV) $@.tmp $@
@@ -141,10 +163,26 @@ VPATH=@SRCDIR@
 	-D'_CRYPTO_NAMESPACE(name)=_crypto_sign_ed25519_@ED25519IMPL@_\#\#name' \
 
 %.c.o: %.c
-	$(CC) $(CFLAGS) -c -o $@.tmp $< && $(MV) $@.tmp $@
+	$(CC) $(CFLAGS) $(CUDA_DEFS) -c -o $@.tmp $< && $(MV) $@.tmp $@
 
 %.S.o: %.S
 	$(CC) $(ASFLAGS) -c -o $@.tmp $< && $(MV) $@.tmp $@
+
+# CUDA separate compilation: -dc produces relocatable device code objects.
+# Cross-file __constant__ references (e.g. cuda_ge_eightpoint) are resolved
+# by the device link step (cuda_dlink.o) below.
+%.cu.o: %.cu
+	$(NVCC) $(CUDA_GENCODE_FLAGS) $(CUDA_CFLAGS) \
+		$(CUDA_DEFS) @MYDEFS@ \
+		-DED25519_@ED25519IMPL@ \
+		-D'CRYPTO_NAMESPACETOP=crypto_sign_ed25519_@ED25519IMPL@' \
+		-D'CRYPTO_NAMESPACE(name)=crypto_sign_ed25519_@ED25519IMPL@_\#\#name' \
+		--compiler-options "$(CSTD)" \
+		-I@SRCDIR@ \
+		-dc -o $@.tmp $< && $(MV) $@.tmp $@
+
+cuda_dlink.o: gpu_autoconf.cu.o worker_cuda.cu.o
+	$(NVCC) $(CUDA_GENCODE_FLAGS) -dlink -o $@.tmp $^ && $(MV) $@.tmp $@
 
 # DO NOT DELETE THIS LINE
 
