@@ -270,10 +270,13 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             if ((s0 & 248) != s0 || ((s31 & 63) | 64) != s31)
                 continue; // bad scalar after addition, skip
 
-            // Reserve a ring slot and write the result, then publish.
-            // Ordering guarantee: result data is fully written before the CPU
-            // can observe done[slot]=1, thanks to __threadfence_system().
+            // Reserve a ring slot, then spin until the drain thread has
+            // consumed it from the previous cycle (backpressure).
+            // Also exit on cuda_endwork to avoid deadlock if a stop signal
+            // arrives while the ring is full.
             int slot = atomicAdd(args.result_head, 1) % args.result_ring_size;
+            while (args.done[slot] && !cuda_endwork) { /* spin */ }
+            if (cuda_endwork) return;
             struct gpu_result *res = &args.results[slot];
             #pragma unroll
             for (int i = 0; i < GPU_RESULT_PUBONION_LEN; i++)

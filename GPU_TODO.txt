@@ -14,13 +14,10 @@ REQUIRED BEFORE MERGE TO MASTER
     - Verify produced onion addresses are valid (Tor accepts them)
     - Check stderr output: GPU name, SM count, batchnum selected
 
-[ ] Fix ring buffer overflow for common patterns
-    - Current: 1024-slot ring with no backpressure; if ring fills before CPU
-      drains it, new match overwrites an unread slot (silent corruption)
-    - Likely to happen with very short filters (1-3 chars) where matches
-      are frequent and the drain thread (1ms poll) can't keep up
-    - Fix: before writing to slot, spin on done[slot]==0; or increase ring
-      to 8192 and document the limit
+[x] Fix ring buffer overflow — FIXED
+    - Kernel now spins on done[slot]==0 before writing (backpressure)
+    - Spin also checks cuda_endwork to avoid deadlock on stop signal
+    - Ring size increased from 1024 to 4096 to reduce spin frequency
 
 [ ] Verify secret key format is Tor-compatible
     - CPU uses SHA-512(seed) to derive sk[0..63] (proper ed25519 expansion)

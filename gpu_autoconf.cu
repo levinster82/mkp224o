@@ -166,7 +166,7 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
     // Result ring buffer — mapped pinned memory shared between GPU and CPU.
     // GPU writes results + done flags directly; CPU reads without cudaMemcpy.
     // Requires cudaDeviceMapHost (enabled by gpu_autoconf via cudaSetDeviceFlags).
-    st->result_ring_size = 1024;
+    st->result_ring_size = 4096;
     size_t ring_bytes  = (size_t)st->result_ring_size * sizeof(struct gpu_result);
     size_t done_bytes  = (size_t)st->result_ring_size * sizeof(int32_t);
 
