@@ -661,11 +661,6 @@ int main(int argc,char **argv)
 	if (!deterministic)
 #endif
 	{
-		if (numwords > 1) {
-			if (!quietflag)
-				fprintf(stderr,"GPU: multi-word patterns not supported, using CPU\n");
-			goto cpu_workers;
-		}
 		// GPU mode: replaces the CPU thread pool
 		if (!quietflag)
 			fprintf(stderr,"using GPU acceleration\n");

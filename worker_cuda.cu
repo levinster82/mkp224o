@@ -89,6 +89,24 @@ addsztoscalar32_cuda(uint8_t *sk, unsigned long long v)
     }
 }
 
+// ── Public key bit-shift (for multi-word pattern chaining) ────────────────
+// Equivalent to worker.c shiftpk(): shifts src left by sbits bits into dst.
+// Safe for in-place use (dst == src) because reads are always ahead of writes.
+static __device__ __forceinline__ void
+shiftpk_cuda(uint8_t *dst, const uint8_t *src, int sbits)
+{
+    int sbytes = sbits / 8;
+    int srem   = sbits % 8;
+    int i;
+    for (i = 0; i + sbytes < 32; i++) {
+        uint8_t hi = src[i + sbytes];
+        uint8_t lo = (i + sbytes + 1 < 32) ? src[i + sbytes + 1] : 0;
+        dst[i] = srem ? (uint8_t)((hi << srem) | (lo >> (8 - srem))) : hi;
+    }
+    for (; i < 32; i++)
+        dst[i] = 0;
+}
+
 // ── GPU filter check ───────────────────────────────────────────────────────
 // Returns filter index (0-based) if match found, else -1.
 static __device__ __forceinline__ int
@@ -190,10 +208,24 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             if (fi < 0)
                 continue;
 
+            // ── Multi-word check (numwords > 1) ──────────────────────────
+            // For each additional word, shift the pk left by the matched
+            // filter's bit-width and check again — same as CPU shiftpk loop.
+            if (args.numwords > 1) {
+                uint8_t wpk[32];
+                const uint8_t *src = pk;
+                int fi2 = fi;
+                bool multiword_ok = true;
+                for (int w = 1; w < args.numwords; w++) {
+                    shiftpk_cuda(wpk, src, cuda_filter_table[fi2].filter_bits);
+                    fi2 = gpu_check_filter(wpk);
+                    if (fi2 < 0) { multiword_ok = false; break; }
+                    src = wpk; // in-place on next iteration
+                }
+                if (!multiword_ok) continue;
+            }
+
             // ── Found a match ─────────────────────────────────────────────
-            // Check numwords (multi-word patterns) — simplified: skip for GPU
-            // (numwords > 1 requires shiftpk which is complex in CUDA;
-            //  single-word match is the common case)
 
             // Build formatted public key with checksum
             // pubonion = pkprefix(32) + pk(32) + checksum(2) + version(1)
@@ -328,14 +360,26 @@ static int upload_filters(void)
     int count = 0;
 
 #ifdef INTFILTER
+    // In OMITMASK mode all filters share a single global mask; in normal mode
+    // each filter carries its own mask in .m.
+    uint64_t global_imask = 0;
+#ifdef OMITMASK
+    memcpy(&global_imask, &ifiltermask, sizeof(global_imask));
+#endif
     for (size_t i = 0; i < VEC_LENGTH(filters) && count < GPU_MAX_FILTERS; i++, count++) {
         struct gpu_filter_entry *e = &htable[count];
         memset(e, 0, sizeof(*e));
         uint64_t f, m;
         memcpy(&f, &VEC_BUF(filters, i).f, sizeof(uint64_t));
+#ifdef OMITMASK
+        m = global_imask;
+#else
         memcpy(&m, &VEC_BUF(filters, i).m, sizeof(uint64_t));
+#endif
         e->ifast = f;
         e->imask = m;
+        // filter_bits = number of set bits in the prefix mask (= N_chars * 5)
+        e->filter_bits = __builtin_popcountll(m);
     }
 #elif defined(BINFILTER)
     for (size_t i = 0; i < VEC_LENGTH(filters) && count < GPU_MAX_FILTERS; i++, count++) {
@@ -347,13 +391,18 @@ static int upload_filters(void)
         memcpy(e->f, bf->f, flen + 1);
         e->flen = flen;
         e->final_mask = bf->mask;
-        // Also compute fast uint64 pre-filter
+        // Count set bits in partial-byte mask (leading 1-bits from MSB)
+        int mbits = 0;
+        uint8_t mv = bf->mask;
+        while (mbits < 8 && (mv & 0x80)) { mbits++; mv = (uint8_t)(mv << 1); }
+        e->filter_bits = flen * 8 + mbits;
+        // Fast uint64 pre-filter for the first 8 bytes
         uint64_t fast = 0, fast_mask = 0;
         for (int j = 0; j < 8 && j <= flen; j++) {
             fast      |= (uint64_t)bf->f[j] << (j * 8);
-            fast_mask |= (uint64_t)0xFF << (j * 8);
+            fast_mask |= (uint64_t)0xFF       << (j * 8);
         }
-        if (flen < 8) fast_mask &= ((uint64_t)1 << ((flen)*8)) - 1;
+        if (flen < 8) fast_mask &= ((uint64_t)1 << (flen * 8)) - 1;
         e->ifast = fast;
         e->imask = fast_mask;
     }

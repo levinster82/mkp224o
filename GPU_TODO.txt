@@ -34,11 +34,9 @@ REQUIRED BEFORE MERGE TO MASTER
 KNOWN LIMITATIONS (deferred, document in README)
 -------------------------------------------------
 
-[ ] numwords > 1 falls back to CPU
-    - Multi-word patterns (-f a -f b) require shiftpk which is not
-      implemented in the GPU kernel
-    - Currently: falls back to CPU with a message, no silent wrong results
-    - Future: implement shiftpk equivalent in CUDA
+[x] numwords > 1 — IMPLEMENTED
+    - shiftpk_cuda added; multi-word check loop in kernel matches CPU behavior
+    - filter_bits populated in upload_filters() for both INTFILTER and BINFILTER
 
 [ ] PASSPHRASE / deterministic mode is CPU-only
     - Strict ordering requirement incompatible with GPU parallelism
