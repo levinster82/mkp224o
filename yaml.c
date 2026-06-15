@@ -279,10 +279,16 @@ int yamlin_parseandcreate(
 			}
 
 			strcpy(&sname[onionendpos],"/hs_ed25519_secret_key");
-			writetofile(sname,secbuf,FORMATTED_SECRET_LEN,1);
+			if (writetofile(sname,secbuf,FORMATTED_SECRET_LEN,1) < 0) {
+				fprintf(stderr,"ERROR: could not write secret key\n");
+				return 1;
+			}
 
 			strcpy(&sname[onionendpos],"/hs_ed25519_public_key");
-			writetofile(sname,pubbuf,FORMATTED_PUBLIC_LEN,0);
+			if (writetofile(sname,pubbuf,FORMATTED_PUBLIC_LEN,0) < 0) {
+				fprintf(stderr,"ERROR: could not write public key\n");
+				return 1;
+			}
 
 			strcpy(&sname[onionendpos],"/hostname");
 			FILE *hfile = fopen(sname,"w");

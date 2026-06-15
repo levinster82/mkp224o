@@ -212,8 +212,9 @@ static void savecheckpoint(void)
 	bool carry = 0;
 	pthread_mutex_lock(&determseed_mutex);
 	for (int i = 0; i < SEED_LEN; i++) {
+		bool new_carry = (u32)determseed[i] < (u32)orig_determseed[i] + (u32)carry;
 		checkpoint[i] = determseed[i] - orig_determseed[i] - carry;
-		carry = checkpoint[i] > determseed[i];
+		carry = new_carry;
 	}
 	pthread_mutex_unlock(&determseed_mutex);
 
@@ -416,8 +417,14 @@ int main(int argc,char **argv)
 					e_additional();
 			}
 			else if (*arg == 'n') {
-				if (argc--)
-					numneedgenerate = (size_t)atoll(*argv++);
+				if (argc--) {
+					long long nv = atoll(*argv++);
+					if (nv < 0) {
+						fprintf(stderr,"number of keys must not be negative\n");
+						exit(1);
+					}
+					numneedgenerate = (size_t)nv;
+				}
 				else
 					e_additional();
 			}
@@ -633,8 +640,9 @@ int main(int argc,char **argv)
 				// Apply checkpoint to determseed
 				bool carry = 0;
 				for (int i = 0; i < SEED_LEN; i++) {
+					bool new_carry = (u32)determseed[i] + (u32)checkpoint[i] + (u32)carry > 0xFF;
 					determseed[i] += checkpoint[i] + carry;
-					carry = determseed[i] < checkpoint[i];
+					carry = new_carry;
 				}
 			}
 		}

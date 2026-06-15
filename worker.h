@@ -1,7 +1,9 @@
 
+#include <signal.h>
+
 extern pthread_mutex_t keysgenerated_mutex;
 extern volatile size_t keysgenerated;
-extern volatile int endwork;
+extern volatile sig_atomic_t endwork;
 
 extern int yamloutput;
 extern int yamlraw;

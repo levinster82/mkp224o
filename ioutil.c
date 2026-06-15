@@ -32,28 +32,26 @@ int writeall(FH fd,const u8 *data,size_t len)
 FH createfile(const char *path,int secret)
 {
 	int fd;
-	do {
+	while (1) {
 		fd = open(path,O_WRONLY | O_CREAT | O_TRUNC,secret ? 0600 : 0666);
-		if (fd < 0) {
-			if (errno == EINTR)
-				continue;
+		if (fd >= 0)
+			break;
+		if (errno != EINTR)
 			return -1;
-		}
-	} while (0);
+	}
 	return fd;
 }
 
 int closefile(FH fd)
 {
 	int cret;
-	do {
+	while (1) {
 		cret = close(fd);
-		if (cret < 0) {
-			if (errno == EINTR)
-				continue;
+		if (cret >= 0)
+			break;
+		if (errno != EINTR)
 			return -1;
-		}
-	} while (0);
+	}
 	return 0;
 }
 
@@ -73,15 +71,13 @@ static int syncwritefile(const char *filename,const char *tmpname,int secret,con
 	}
 
 	int sret;
-	do {
+	while (1) {
 		sret = fsync(f);
-		if (sret < 0) {
-			if (errno == EINTR)
-				continue;
-
+		if (sret >= 0)
+			break;
+		if (errno != EINTR)
 			goto failclose;
-		}
-	} while (0);
+	}
 
 	if (closefile(f) < 0) {
 		goto failrm;
@@ -147,28 +143,22 @@ foundslash:
 	;
 
 	int dirf;
-	do {
+	while (1) {
 		dirf = open(dirname,O_RDONLY);
-		if (dirf < 0) {
-			if (errno == EINTR)
-				continue;
-
-			// failed for non-eintr reasons
+		if (dirf >= 0)
+			break;
+		if (errno != EINTR)
 			goto skipdsync; // don't really care enough
-		}
-	} while (0);
+	}
 
 	int sret;
-	do {
+	while (1) {
 		sret = fsync(dirf);
-		if (sret < 0) {
-			if (errno == EINTR)
-				continue;
-
-			// failed for non-eintr reasons
+		if (sret >= 0)
+			break;
+		if (errno != EINTR)
 			break; // don't care
-		}
-	} while (0);
+	}
 
 	(void) closefile(dirf); // don't care
 

@@ -40,7 +40,7 @@ static const char checksumstr[] = ".onion checksum";
 
 pthread_mutex_t keysgenerated_mutex;
 volatile size_t keysgenerated = 0;
-volatile int endwork = 0;
+volatile sig_atomic_t endwork = 0;
 
 int yamloutput = 0;
 int yamlraw = 0;
@@ -110,10 +110,20 @@ static void onionready(char *sname,const u8 *secret,const u8 *pubonion,int warnn
 		}
 
 		strcpy(&sname[onionendpos],"/hs_ed25519_secret_key");
-		writetofile(sname,secret,FORMATTED_SECRET_LEN,1);
+		if (writetofile(sname,secret,FORMATTED_SECRET_LEN,1) < 0) {
+			pthread_mutex_lock(&fout_mutex);
+			fprintf(stderr,"ERROR: could not write secret key to \"%s\"\n",sname);
+			pthread_mutex_unlock(&fout_mutex);
+			return;
+		}
 
 		strcpy(&sname[onionendpos],"/hs_ed25519_public_key");
-		writetofile(sname,pubonion,FORMATTED_PUBLIC_LEN,0);
+		if (writetofile(sname,pubonion,FORMATTED_PUBLIC_LEN,0) < 0) {
+			pthread_mutex_lock(&fout_mutex);
+			fprintf(stderr,"ERROR: could not write public key to \"%s\"\n",sname);
+			pthread_mutex_unlock(&fout_mutex);
+			return;
+		}
 
 		strcpy(&sname[onionendpos],"/hostname");
 		FILE *hfile = fopen(sname,"w");
@@ -181,8 +191,9 @@ static inline void shiftpk(u8 *dst,const u8 *src,size_t sbits)
 	size_t i,sbytes = sbits / 8;
 	sbits %= 8;
 	for (i = 0;i + sbytes < PUBLIC_LEN;++i) {
-		dst[i] = (u8) ((src[i+sbytes] << sbits) |
-			(src[i+sbytes+1] >> (8 - sbits)));
+		u8 hi = src[i+sbytes];
+		u8 lo = (i + sbytes + 1 < PUBLIC_LEN) ? src[i+sbytes+1] : 0;
+		dst[i] = sbits ? (u8)((hi << sbits) | (lo >> (8 - sbits))) : hi;
 	}
 	for(;i < PUBLIC_LEN;++i)
 		dst[i] = 0;
