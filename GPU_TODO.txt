@@ -3,6 +3,7 @@ mkp224o CUDA implementation
 ============================
 
 STATUS: GPU hardware tested and working. RTX 3070 (sm_86), valid addresses confirmed.
+       Self-contained binary (static libcudart); runs on any machine with CPU fallback.
 
 
 REQUIRED BEFORE MERGE TO MASTER
@@ -16,6 +17,17 @@ REQUIRED BEFORE MERGE TO MASTER
     - Kernel now spins on done[slot]==0 before writing (backpressure)
     - Spin also checks cuda_endwork to avoid deadlock on stop signal
     - Ring size increased from 1024 to 4096 to reduce spin frequency
+
+[x] Self-contained binary — no runtime CUDA dependency
+    - Linked with -cudart static; libcudart baked into binary at build time
+    - Binary runs on machines without a GPU (falls back to CPU threads silently)
+    - configure auto-detects nvcc in PATH / /usr/local/cuda/bin (default=auto)
+    - No --enable-cuda flag required; explicit flag still supported
+
+[x] CPU fallback UX
+    - Prints "no GPU found, using N CPU threads" as a single combined line
+    - -C flag added to force CPU-only mode in CUDA builds
+    - Final stats line printed on CPU exit when -n flag is used (matches GPU)
 
 [ ] Verify secret key format is Tor-compatible
     - CPU uses SHA-512(seed) to derive sk[0..63] (proper ed25519 expansion)
