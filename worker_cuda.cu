@@ -322,11 +322,11 @@ static void *drain_thread(void *arg)
     struct timespec ts = { 0, 1000000 }; // 1ms poll interval
 
 #ifdef STATISTICS
-    u64 istarttime = 0, inowtime, ireporttime = 0, elapsedoffset = 0;
+    u64 istarttime, inowtime, ireporttime = 0, elapsedoffset = 0;
     u64 sumcalc = 0, sumsuccess = 0;
     u64 last_numcalc = 0;
     u64 local_success = 0; // independent of keysgenerated (only incremented under -n)
-    if (da->reportdelay) {
+    {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         istarttime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
@@ -393,6 +393,21 @@ static void *drain_thread(void *arg)
         }
 #endif
     }
+
+#ifdef STATISTICS
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        inowtime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
+        u64 elapsed = inowtime - istarttime + elapsedoffset;
+        u64 total_calc = (u64)*st->h_numcalc;
+        double calcpersec = elapsed ? 1000000.0 * (double)total_calc   / elapsed : 0.0;
+        double succpersec = elapsed ? 1000000.0 * (double)local_success / elapsed : 0.0;
+        fprintf(stderr,
+            ">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
+            calcpersec, succpersec, 0.0, elapsed / 1000000.0);
+    }
+#endif
 
     // Write stop flag directly to mapped pinned memory — no CUDA stream call needed.
     // cudaMemcpyToSymbol() would serialize behind the persistent kernel (deadlock).
