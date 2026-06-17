@@ -4,24 +4,25 @@
 #include <cuda_runtime.h>
 #include <sodium/randombytes.h>
 
+extern "C" {
 #include "types.h"
 #include "common.h"
+#include "vec.h"
 #include "worker.h"
+}
 #include "worker_cuda.h"
 #include "ed25519/cuda/ge_cuda.cuh"
 
-// Declare ref10 types directly, bypassing CRYPTO_NAMESPACE macros.
-// ref10's fe is int32_t[10] and ge_p3/ge_precomp are plain structs.
-// These match ge_p3_cuda / ge_precomp_cuda layout (same int32_t[10] representation).
+// Ref10 types: fe is int32_t[10], ge_p3/ge_precomp are plain structs.
+// Layout-identical to ge_p3_cuda / ge_precomp_cuda (same int32_t[10] fields).
 typedef int32_t fe_ref10[10];
 typedef struct { fe_ref10 X, Y, Z, T; } ge_p3_ref10;
 typedef struct { fe_ref10 yplusx, yminusx, xy2d; } ge_precomp_ref10;
 
-// Always use the ref10 symbols (full name, not namespaced) for starting-point generation.
-// CUDA_REF10_OBJ in GNUmakefile.in guarantees these are always linked when USE_CUDA=1.
+// Use CRYPTO_NAMESPACE so symbol names match however the ed25519 impl was compiled.
 extern "C" {
-void crypto_sign_ed25519_ref10_ge_scalarmult_base(ge_p3_ref10 *, const unsigned char *);
-extern ge_precomp_ref10 crypto_sign_ed25519_ref10_ge_eightpoint;
+void CRYPTO_NAMESPACE(ge_scalarmult_base)(ge_p3_ref10 *, const unsigned char *);
+void CRYPTO_NAMESPACE(ge_get_base_precomp)(ge_precomp_ref10 *);
 }
 
 #define CUDA_CHECK(call) \
@@ -107,18 +108,19 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
 
 extern "C" int gpu_init(struct gpu_state *st, int quiet)
 {
+    (void)quiet;
     struct gpu_config *cfg = &st->cfg;
     int total_threads = cfg->num_blocks * cfg->threads_per_block;
     int B = cfg->batchnum;
 
-    // Copy ge_eightpoint into __constant__ memory on the device.
-    // ref10 ge_precomp {yplusx, yminusx, xy2d} and ge_precomp_cuda are
-    // layout-identical (both use int32_t[10] for each field element).
+    // Copy the generator B in precomp (Duif) form into __constant__ memory.
+    // base[0][0] = 1*B; ge_precomp and ge_precomp_cuda are layout-identical (int32_t[10]).
+    ge_precomp_ref10 base_precomp;
+    CRYPTO_NAMESPACE(ge_get_base_precomp)(&base_precomp);
     ge_precomp_cuda eightpt_host;
-    const ge_precomp_ref10 *ep = &crypto_sign_ed25519_ref10_ge_eightpoint;
-    memcpy(eightpt_host.yplusx,  ep->yplusx,  10 * sizeof(int32_t));
-    memcpy(eightpt_host.yminusx, ep->yminusx, 10 * sizeof(int32_t));
-    memcpy(eightpt_host.xy2d,    ep->xy2d,    10 * sizeof(int32_t));
+    memcpy(eightpt_host.yplusx,  base_precomp.yplusx,  10 * sizeof(int32_t));
+    memcpy(eightpt_host.yminusx, base_precomp.yminusx, 10 * sizeof(int32_t));
+    memcpy(eightpt_host.xy2d,    base_precomp.xy2d,    10 * sizeof(int32_t));
     CUDA_CHECK(cudaMemcpyToSymbol(cuda_ge_eightpoint, &eightpt_host, sizeof(ge_precomp_cuda)));
 
     // Batch buffers: xyz [B×30×stride], tmp [B×10×stride]
@@ -149,7 +151,7 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
         sk_t[31] |= 64;   // set bit 254
 
         ge_p3_ref10 pt;
-        crypto_sign_ed25519_ref10_ge_scalarmult_base(&pt, sk_t);
+        CRYPTO_NAMESPACE(ge_scalarmult_base)(&pt, sk_t);
 
         // Flatten ge_p3 {X,Y,Z,T} into h_pts as [f*10+li] per thread
         const int32_t *coords[4] = {pt.X, pt.Y, pt.Z, pt.T};
@@ -172,7 +174,7 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
 
     CUDA_CHECK(cudaHostAlloc(&st->h_results, ring_bytes,  cudaHostAllocMapped));
     CUDA_CHECK(cudaHostAlloc((void**)&st->h_done, done_bytes, cudaHostAllocMapped));
-    memset(st->h_done, 0, done_bytes);
+    memset((void *)st->h_done, 0, done_bytes);
     CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_results, st->h_results, 0));
     CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_done,    (void*)st->h_done,  0));
 

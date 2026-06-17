@@ -103,3 +103,9 @@ void ge_scalarmult_base(ge_p3 *h,const unsigned char *a)
     ge_madd(&r,h,&t); ge_p1p1_to_p3(h,&r);
   }
 }
+
+/* base[0][0] = 1*B — the generator in precomp (Duif) form. */
+void ge_get_base_precomp(ge_precomp *out)
+{
+  *out = base[0][0];
+}

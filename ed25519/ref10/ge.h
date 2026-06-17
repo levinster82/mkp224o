@@ -73,6 +73,7 @@ typedef unsigned char bytes32[32];
 #define ge_add CRYPTO_NAMESPACE(ge_add)
 #define ge_sub CRYPTO_NAMESPACE(ge_sub)
 #define ge_scalarmult_base CRYPTO_NAMESPACE(ge_scalarmult_base)
+#define ge_get_base_precomp CRYPTO_NAMESPACE(ge_get_base_precomp)
 #define ge_double_scalarmult_vartime CRYPTO_NAMESPACE(ge_double_scalarmult_vartime)
 
 extern void ge_tobytes(unsigned char *,const ge_p2 *);
@@ -96,6 +97,7 @@ extern void ge_msub(ge_p1p1 *,const ge_p3 *,const ge_precomp *);
 extern void ge_add(ge_p1p1 *,const ge_p3 *,const ge_cached *);
 extern void ge_sub(ge_p1p1 *,const ge_p3 *,const ge_cached *);
 extern void ge_scalarmult_base(ge_p3 *,const unsigned char *);
+extern void ge_get_base_precomp(ge_precomp *);
 extern void ge_double_scalarmult_vartime(ge_p2 *,const unsigned char *,const ge_p3 *,const unsigned char *);
 
 #endif

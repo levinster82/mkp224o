@@ -118,7 +118,11 @@ util: $(UTIL_EXE)
 test: $(TEST_EXE)
 
 mkp224o@EXEEXT@: $(MAIN_OBJ)
+ifeq ($(ENABLE_CUDA),1)
+	$(NVCC) $(CUDA_GENCODE_FLAGS) $(LDFLAGS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
+else
 	$(CC) $(LDFLAGS) $(CFLAGS) $(CUDA_DEFS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
+endif
 
 calcest@EXEEXT@: $(UTIL_CALCEST_OBJ)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@.tmp $^ $(UTIL_CALCEST_LIB) && $(MV) $@.tmp $@

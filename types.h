@@ -1,4 +1,6 @@
 
+#include <stdint.h>
+
 #define U8_MAX UINT8_MAX
 #define I8_MIN INT8_MIN
 #define I8_MAX INT8_MAX

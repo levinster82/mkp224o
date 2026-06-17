@@ -2,27 +2,26 @@
 // Each thread runs an independent copy of the worker_batch loop, using
 // Montgomery batch inversion to amortize the dominant fe_invert cost.
 
-#define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <cuda_runtime.h>
 
+extern "C" {
 #include "types.h"
 #include "common.h"
+#include "vec.h"
 #include "worker.h"
-#include "worker_cuda.h"
-
 #ifndef _WIN32
 #include "ioutil.h"
 #include "base32.h"
 #include "keccak.h"
 #include "yaml.h"
 #endif
-
-// Pull in filter definitions the same way worker.c does
 #include "filters.h"
+}
+#include "worker_cuda.h"
 
 // ── CUDA device headers ────────────────────────────────────────────────────
 #include "ed25519/cuda/fe_cuda.cuh"
