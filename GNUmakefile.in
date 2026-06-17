@@ -119,7 +119,10 @@ test: $(TEST_EXE)
 
 mkp224o@EXEEXT@: $(MAIN_OBJ)
 ifeq ($(ENABLE_CUDA),1)
-	$(NVCC) $(CUDA_GENCODE_FLAGS) $(LDFLAGS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
+# Link via nvcc with -cudart static so libcudart is baked into the binary.
+# The resulting binary runs on any machine; on machines without a GPU
+# cudaGetDeviceCount() returns 0 and the code falls back to CPU threads.
+	$(NVCC) $(CUDA_GENCODE_FLAGS) -cudart static $(LDFLAGS) -o $@.tmp $^ -lpthread -lsodium @MAINLIB@ && $(MV) $@.tmp $@
 else
 	$(CC) $(LDFLAGS) $(CFLAGS) $(CUDA_DEFS) -o $@.tmp $^ $(MAIN_LIB) && $(MV) $@.tmp $@
 endif

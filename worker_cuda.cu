@@ -257,8 +257,10 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             #pragma unroll
             for (int i = 0; i < 64; i++)
                 secret[32 + i] = base_sk[i];
-            // Add scalar offset to first 32 bytes of the private scalar
-            unsigned long long offset = counter + (unsigned long long)b * 8;
+            // Add scalar offset to first 32 bytes of the private scalar.
+            // Step is 1 (not 8): cuda_ge_eightpoint = 1*B so each inner loop
+            // step adds 1*B — offset must match the actual point increment.
+            unsigned long long offset = counter + (unsigned long long)b;
             addsztoscalar32_cuda(&secret[32], offset);
 
             // Sanity check (matches CPU's check)
@@ -289,7 +291,7 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
         if (threadIdx.x == 0)
             atomicAdd(args.numcalc, (unsigned long long)blockDim.x * B);
 
-        counter += (unsigned long long)B * 8;
+        counter += (unsigned long long)B;
     }
 }
 
@@ -497,8 +499,12 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
     static struct gpu_state st;
     memset(&st, 0, sizeof(st));
 
-    // Auto-configure GPU
-    if (gpu_autoconf(&st.cfg, quiet) < 0) return -1;
+    // Auto-configure GPU — returns -1 silently if no device found
+    if (gpu_autoconf(&st.cfg, quiet) < 0)
+        return -1;
+
+    if (!quiet)
+        fprintf(stderr, "using GPU acceleration\n");
 
     // Initialize device memory and starting points
     if (gpu_init(&st, quiet) < 0) return -1;

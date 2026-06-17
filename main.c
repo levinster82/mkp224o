@@ -141,6 +141,9 @@ static void printhelp(FILE *out,const char *progname)
 #endif
 		"      --rawyaml         raw (unprefixed) public/secret keys for -y/-Y\n"
 		"                        (may be useful for tor controller API).\n"
+#ifdef USE_CUDA
+		"  -C                    disable GPU acceleration, use CPU threads only.\n"
+#endif
 		"  -h, --help, --usage   print help to stdout and quit.\n"
 		"  -V, --version         print version information to stdout and exit.\n"
 		,progname,progname);
@@ -285,6 +288,9 @@ int main(int argc,char **argv)
 	int deterministic = 0;
 #endif
 	int outfileoverwrite = 0;
+#ifdef USE_CUDA
+	int nogpuflag = 0;
+#endif
 	struct threadvec threads;
 #ifdef STATISTICS
 	struct statsvec stats;
@@ -388,6 +394,10 @@ int main(int argc,char **argv)
 			}
 			else if (*arg == 'q')
 				++quietflag;
+#ifdef USE_CUDA
+			else if (*arg == 'C')
+				nogpuflag = 1;
+#endif
 			else if (*arg == 'x')
 				fout = 0;
 			else if (*arg == 'v')
@@ -616,9 +626,11 @@ int main(int argc,char **argv)
 		if (numthreads <= 0)
 			numthreads = 1;
 	}
+#ifndef USE_CUDA
 	if (!quietflag)
 		fprintf(stderr,"using %d %s\n",
 			numthreads,numthreads == 1 ? "thread" : "threads");
+#endif
 
 #ifdef PASSPHRASE
 	if (deterministic) {
@@ -657,21 +669,26 @@ int main(int argc,char **argv)
 	signal(SIGINT,termhandler);
 
 #ifdef USE_CUDA
+	int gpu_failed = 0;
 #ifdef PASSPHRASE
 	if (!deterministic)
 #endif
-	{
-		// GPU mode: replaces the CPU thread pool
-		if (!quietflag)
-			fprintf(stderr,"using GPU acceleration\n");
-		int gret = gpu_worker_launch(quietflag, reportdelay, realtimestats);
-		if (gret < 0) {
-			fprintf(stderr,"GPU launch failed, falling back to CPU\n");
-			goto cpu_workers;
-		}
-		goto done;
+	if (!nogpuflag) {
+		int gret = gpu_worker_launch(quietflag,reportdelay,realtimestats);
+		if (gret >= 0)
+			goto done;
+		gpu_failed = 1;
+		goto cpu_workers;
 	}
 cpu_workers:
+	if (!quietflag) {
+		if (gpu_failed)
+			fprintf(stderr,"no GPU found, using %d CPU %s\n",
+				numthreads,numthreads == 1 ? "thread" : "threads");
+		else
+			fprintf(stderr,"using %d %s\n",
+				numthreads,numthreads == 1 ? "thread" : "threads");
+	}
 #endif // USE_CUDA
 
 	VEC_INIT(threads);
@@ -841,6 +858,32 @@ cpu_workers:
 
 	if (!quietflag)
 		fprintf(stderr," done.\n");
+
+#ifdef STATISTICS
+	{
+		clock_gettime(CLOCK_MONOTONIC,&nowtime);
+		inowtime = (1000000 * (u64)nowtime.tv_sec) + ((u64)nowtime.tv_nsec / 1000);
+		u64 sumcalc = 0,sumsuccess = 0,sumrestart = 0;
+		for (int i = 0;i < numthreads;++i) {
+			u32 newt,tdiff;
+			newt = VEC_BUF(stats,i).numcalc.v;
+			tdiff = newt - VEC_BUF(tstats,i).oldnumcalc;
+			sumcalc += VEC_BUF(tstats,i).numcalc + (u64)tdiff;
+			newt = VEC_BUF(stats,i).numsuccess.v;
+			tdiff = newt - VEC_BUF(tstats,i).oldnumsuccess;
+			sumsuccess += VEC_BUF(tstats,i).numsuccess + (u64)tdiff;
+			newt = VEC_BUF(stats,i).numrestart.v;
+			tdiff = newt - VEC_BUF(tstats,i).oldnumrestart;
+			sumrestart += VEC_BUF(tstats,i).numrestart + (u64)tdiff;
+		}
+		u64 elapsed = inowtime - istarttime + elapsedoffset;
+		double calcpersec = elapsed ? (1000000.0 * sumcalc) / elapsed : 0.0;
+		double succpersec = elapsed ? (1000000.0 * sumsuccess) / elapsed : 0.0;
+		double restpersec = elapsed ? (1000000.0 * sumrestart) / elapsed : 0.0;
+		fprintf(stderr,">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
+			calcpersec,succpersec,restpersec,elapsed / 1000000.0);
+	}
+#endif
 
 	if (yamloutput)
 		yamlout_clean();

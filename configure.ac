@@ -380,8 +380,8 @@ CUDA_GENCODE_FLAGS=""
 ENABLE_CUDA=0
 
 AC_ARG_ENABLE([cuda],
-    [AS_HELP_STRING([--enable-cuda], [enable NVIDIA CUDA GPU acceleration @<:@default=no@:>@])],
-    [], [enable_cuda=no]
+    [AS_HELP_STRING([--enable-cuda], [enable NVIDIA CUDA GPU acceleration @<:@default=auto@:>@])],
+    [], [enable_cuda=auto]
 )
 
 AC_ARG_WITH([cuda-path],
@@ -396,18 +396,27 @@ AC_ARG_WITH([cuda-arch],
     [], [with_cuda_arch=""]
 )
 
-AS_IF([test x"$enable_cuda" = x"yes"], [
-    # Locate nvcc
+# Locate nvcc: check explicit path first, then PATH, then /usr/local/cuda/bin
+AS_IF([test x"$enable_cuda" != x"no"], [
     AS_IF([test -n "$with_cuda_path"],
         [NVCC="$with_cuda_path/bin/nvcc"],
-        [AC_PATH_PROG([NVCC], [nvcc], [])]
+        [AC_PATH_PROG([NVCC], [nvcc], [])
+         AS_IF([test -z "$NVCC" -a -x "/usr/local/cuda/bin/nvcc"],
+             [NVCC="/usr/local/cuda/bin/nvcc"])]
     )
+])
 
-    AS_IF([test -z "$NVCC" -o ! -x "$NVCC"], [
-        AC_MSG_ERROR([nvcc not found; install CUDA toolkit or use --with-cuda-path=])
+AS_IF([test x"$enable_cuda" = x"yes" -o x"$enable_cuda" = x"auto"], [
+    AS_IF([test -n "$NVCC" -a -x "$NVCC"], [enable_cuda=yes], [
+        AS_IF([test x"$enable_cuda" = x"yes"],
+            [AC_MSG_ERROR([nvcc not found; install CUDA toolkit or use --with-cuda-path=])],
+            [enable_cuda=no; AC_MSG_NOTICE([nvcc not found, building without GPU support])]
+        )
     ])
+])
 
-    CUDA_TOOLKIT_ROOT=`"$NVCC" --version 2>/dev/null | true`
+AS_IF([test x"$enable_cuda" = x"yes"], [
+
     AS_IF([test -n "$with_cuda_path"],
         [CUDA_CFLAGS="-I$with_cuda_path/include"
          CUDA_LDFLAGS="-L$with_cuda_path/lib64 -lcudart"],

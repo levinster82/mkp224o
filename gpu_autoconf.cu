@@ -60,6 +60,12 @@ static int clamp_pow2(int n, int lo, int hi)
 
 extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
 {
+    // Check for at least one CUDA device before doing anything else.
+    // Return -1 silently so main() falls back to CPU without a scary error.
+    int dev_count = 0;
+    if (cudaGetDeviceCount(&dev_count) != cudaSuccess || dev_count == 0)
+        return -1;
+
     // Enable mapped pinned memory (needed for zero-copy result ring buffer)
     CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceMapHost));
 
@@ -113,8 +119,9 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
     int total_threads = cfg->num_blocks * cfg->threads_per_block;
     int B = cfg->batchnum;
 
-    // Copy the generator B in precomp (Duif) form into __constant__ memory.
-    // base[0][0] = 1*B; ge_precomp and ge_precomp_cuda are layout-identical (int32_t[10]).
+    // Copy the generator B (= 1*B = base[0][0]) into __constant__ memory.
+    // The kernel steps by +1*B per inner loop iteration; the sk offset tracks
+    // the same step of 1. ge_precomp and ge_precomp_cuda are layout-identical.
     ge_precomp_ref10 base_precomp;
     CRYPTO_NAMESPACE(ge_get_base_precomp)(&base_precomp);
     ge_precomp_cuda eightpt_host;
