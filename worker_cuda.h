@@ -35,6 +35,15 @@ struct gpu_state {
     volatile int32_t *h_done;     // pinned host pointer to per-slot done flags
     int32_t          *d_done;     // device pointer to same mapped pinned allocation
     int      result_ring_size;
+
+    // Stop flag — mapped pinned so CPU can write directly without CUDA stream ops.
+    // Using cudaMemcpyToSymbol() would serialize behind the persistent kernel.
+    volatile int *h_endwork;     // CPU writes 1 here to stop the kernel
+    int          *d_endwork;     // GPU reads from this device pointer
+
+    // Candidate counter — mapped pinned; one block-level atomicAdd per outer loop.
+    volatile unsigned long long *h_numcalc; // CPU reads total candidates tested
+    unsigned long long          *d_numcalc; // GPU writes via atomicAdd
 };
 
 // One matched key pair returned to CPU drain thread
@@ -57,8 +66,10 @@ void gpu_cleanup(struct gpu_state *st);
 
 // Launch GPU kernel and block until endwork=1.
 // Results are drained on a CPU thread and forwarded to onionready().
+// reportdelay: statistics print interval in microseconds (0 = disabled).
+// realtimestats: 1 = rolling window (reset each period), 0 = cumulative.
 // Returns 0 on success, -1 on CUDA error.
-int gpu_worker_launch(int quiet);
+int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats);
 
 #ifdef __cplusplus
 }

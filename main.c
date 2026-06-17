@@ -664,7 +664,7 @@ int main(int argc,char **argv)
 		// GPU mode: replaces the CPU thread pool
 		if (!quietflag)
 			fprintf(stderr,"using GPU acceleration\n");
-		int gret = gpu_worker_launch(quietflag);
+		int gret = gpu_worker_launch(quietflag, reportdelay, realtimestats);
 		if (gret < 0) {
 			fprintf(stderr,"GPU launch failed, falling back to CPU\n");
 			goto cpu_workers;

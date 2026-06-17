@@ -55,10 +55,6 @@ __constant__ uint8_t cuda_pkprefix[32];
 __constant__ uint8_t cuda_skprefix[32];
 __constant__ uint8_t cuda_checksumstr[16]; // ".onion checksum" + 0 padding
 
-// Device-side stop flag; written by CPU via cudaMemcpyToSymbol when endwork=1.
-// GPU kernel polls this to terminate cleanly.
-__device__ volatile int cuda_endwork = 0;
-
 // ── Kernel argument block ──────────────────────────────────────────────────
 struct kernel_args {
     int32_t *batch_xyz;        // [B * 30 * stride] — X,Y,Z per batch slot
@@ -68,6 +64,8 @@ struct kernel_args {
     int32_t *result_head;      // atomic total write counter (device allocation)
     struct gpu_result *results; // mapped pinned result slots (device pointer)
     volatile int32_t *done;    // mapped pinned per-slot done flags (device pointer)
+    volatile int          *endwork_flag; // mapped pinned stop flag (CPU writes 1 to stop)
+    unsigned long long    *numcalc;      // mapped pinned candidate counter (block-level atomicAdd)
     int result_ring_size;
     int stride;                // total_threads = gridDim.x * blockDim.x
     int numwords;
@@ -168,7 +166,7 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
 
     unsigned long long counter = 0;
 
-    while (!cuda_endwork) {
+    while (!*args.endwork_flag) {
         // ── Inner loop: accumulate B ge_p3 candidates ──────────────────
         for (int b = 0; b < B; b++) {
             // Store X, Y, Z in batch buffer (T not needed for tobytes)
@@ -271,11 +269,11 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
 
             // Reserve a ring slot, then spin until the drain thread has
             // consumed it from the previous cycle (backpressure).
-            // Also exit on cuda_endwork to avoid deadlock if a stop signal
+            // Also exit on *args.endwork_flag to avoid deadlock if a stop signal
             // arrives while the ring is full.
             int slot = atomicAdd(args.result_head, 1) % args.result_ring_size;
-            while (args.done[slot] && !cuda_endwork) { /* spin */ }
-            if (cuda_endwork) return;
+            while (args.done[slot] && !*args.endwork_flag) { /* spin */ }
+            if (*args.endwork_flag) return;
             struct gpu_result *res = &args.results[slot];
             #pragma unroll
             for (int i = 0; i < GPU_RESULT_PUBONION_LEN; i++)
@@ -286,6 +284,10 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             __threadfence_system(); // flush writes to mapped pinned memory
             args.done[slot] = 1;   // signal CPU that this slot is ready
         }
+
+        // One atomic per block per outer loop — avoids per-thread contention.
+        if (threadIdx.x == 0)
+            atomicAdd(args.numcalc, (unsigned long long)blockDim.x * B);
 
         counter += (unsigned long long)B * 8;
     }
@@ -304,6 +306,10 @@ template __global__ void worker_cuda_kernel<1024>(struct kernel_args);
 struct drain_args {
     struct gpu_state *st;
     int quiet;
+#ifdef STATISTICS
+    u64 reportdelay;
+    int realtimestats;
+#endif
 };
 
 static void *drain_thread(void *arg)
@@ -314,6 +320,18 @@ static void *drain_thread(void *arg)
     int read_idx  = 0;
 
     struct timespec ts = { 0, 1000000 }; // 1ms poll interval
+
+#ifdef STATISTICS
+    u64 istarttime = 0, inowtime, ireporttime = 0, elapsedoffset = 0;
+    u64 sumcalc = 0, sumsuccess = 0;
+    u64 last_numcalc = 0;
+    u64 local_success = 0; // independent of keysgenerated (only incremented under -n)
+    if (da->reportdelay) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        istarttime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
+    }
+#endif
 
     while (!endwork) {
         // Each slot sets done[slot]=1 (after __threadfence_system) when ready.
@@ -327,18 +345,58 @@ static void *drain_thread(void *arg)
                 onionready(sname, hres->secret, hres->pubonion, 0);
                 free(sname);
             }
-
+#ifdef STATISTICS
+            local_success++;
+#endif
             // Reset done flag so this slot can be reused
             st->h_done[read_idx] = 0;
             read_idx = (read_idx + 1) % ring_size;
         }
 
         nanosleep(&ts, 0);
+
+#ifdef STATISTICS
+        if (da->reportdelay) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            inowtime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
+
+            u64 cur_calc = (u64)*st->h_numcalc;
+            sumcalc    += cur_calc - last_numcalc;
+            sumsuccess  = local_success;
+            last_numcalc = cur_calc;
+
+            if (!ireporttime || (i64)(inowtime - ireporttime) >= (i64)da->reportdelay) {
+                if (ireporttime)
+                    ireporttime += da->reportdelay;
+                else
+                    ireporttime = inowtime;
+                if (!ireporttime) ireporttime = 1;
+
+                // Use window duration for rates; total elapsed for display.
+                u64 window  = inowtime - istarttime;
+                u64 elapsed = window + elapsedoffset;
+                double calcpersec = window ? 1000000.0 * (double)sumcalc    / window : 0.0;
+                double succpersec = window ? 1000000.0 * (double)sumsuccess / window : 0.0;
+                fprintf(stderr,
+                    ">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
+                    calcpersec, succpersec, 0.0, elapsed / 1000000.0);
+
+                if (da->realtimestats) {
+                    sumcalc    = 0;
+                    sumsuccess = 0;
+                    local_success = 0;
+                    elapsedoffset += window;
+                    istarttime = inowtime;
+                }
+            }
+        }
+#endif
     }
 
-    // Signal GPU kernel to stop and wait for it to acknowledge
-    int one = 1;
-    cudaMemcpyToSymbol(cuda_endwork, &one, sizeof(int));
+    // Write stop flag directly to mapped pinned memory — no CUDA stream call needed.
+    // cudaMemcpyToSymbol() would serialize behind the persistent kernel (deadlock).
+    *st->h_endwork = 1;
 
     return 0;
 }
@@ -416,8 +474,11 @@ static int upload_filters(void)
     return 0;
 }
 
-extern "C" int gpu_worker_launch(int quiet)
+extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
 {
+#ifndef STATISTICS
+    (void)reportdelay; (void)realtimestats;
+#endif
     static struct gpu_state st;
     memset(&st, 0, sizeof(st));
 
@@ -449,9 +510,15 @@ extern "C" int gpu_worker_launch(int quiet)
     kargs.result_ring_size = st.result_ring_size;
     kargs.stride           = st.cfg.num_blocks * st.cfg.threads_per_block;
     kargs.numwords         = numwords;
+    kargs.endwork_flag     = st.d_endwork;
+    kargs.numcalc          = st.d_numcalc;
 
     // Start CPU drain thread
-    struct drain_args da = { &st, quiet };
+    struct drain_args da = { &st, quiet
+#ifdef STATISTICS
+        , reportdelay, realtimestats
+#endif
+    };
     pthread_t drain;
     if (pthread_create(&drain, NULL, drain_thread, &da) != 0) {
         fprintf(stderr, "failed to create GPU drain thread\n");

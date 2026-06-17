@@ -178,6 +178,14 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
     CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_results, st->h_results, 0));
     CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_done,    (void*)st->h_done,  0));
 
+    CUDA_CHECK(cudaHostAlloc((void**)&st->h_endwork, sizeof(int), cudaHostAllocMapped));
+    *st->h_endwork = 0;
+    CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_endwork, (void*)st->h_endwork, 0));
+
+    CUDA_CHECK(cudaHostAlloc((void**)&st->h_numcalc, sizeof(unsigned long long), cudaHostAllocMapped));
+    *st->h_numcalc = 0;
+    CUDA_CHECK(cudaHostGetDevicePointer((void**)&st->d_numcalc, (void*)st->h_numcalc, 0));
+
     CUDA_CHECK(cudaMalloc(&st->d_result_head, sizeof(int32_t)));
     CUDA_CHECK(cudaMemset(st->d_result_head, 0, sizeof(int32_t)));
 
@@ -193,5 +201,7 @@ extern "C" void gpu_cleanup(struct gpu_state *st)
     CUDA_CHECK_VOID(cudaFreeHost(st->h_results));  // mapped: free host ptr only
     CUDA_CHECK_VOID(cudaFreeHost((void *)st->h_done));
     CUDA_CHECK_VOID(cudaFree(st->d_result_head));
+    CUDA_CHECK_VOID(cudaFreeHost((void *)st->h_endwork));
+    CUDA_CHECK_VOID(cudaFreeHost((void *)st->h_numcalc));
     memset(st, 0, sizeof(*st));
 }
