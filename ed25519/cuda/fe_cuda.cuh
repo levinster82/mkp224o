@@ -280,34 +280,35 @@ fe_frombytes_cuda(fe_cuda h, const uint8_t *s)
     h[8]=(int32_t)h8; h[9]=(int32_t)h9;
 }
 
-// fe^(2^255-21) = fe^-1 mod p, using the same addition chain as ref10/pow225521.h
+// fe^(2^255-21) = fe^-1 mod p.
+// Direct port of ref10/pow225521.h — t0=z^11 is preserved to the final multiply.
 static __device__ __forceinline__ void
 fe_invert_cuda(fe_cuda out, const fe_cuda z)
 {
     fe_cuda t0, t1, t2, t3;
     int i;
-    fe_sq_cuda(t0, z);
-    fe_sq_cuda(t1, t0); for (i=1;i<1;i++) fe_sq_cuda(t1,t1);
-    fe_mul_cuda(t1, z, t1);
-    fe_mul_cuda(t0, t0, t1);
-    fe_sq_cuda(t2, t0); for (i=1;i<1;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t1, t1, t2);
-    fe_sq_cuda(t2, t1); for (i=1;i<4;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t1, t2, t1);
-    fe_sq_cuda(t2, t1); for (i=1;i<9;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t2, t2, t1);
-    fe_sq_cuda(t3, t2); for (i=1;i<19;i++) fe_sq_cuda(t3,t3);
-    fe_mul_cuda(t2, t3, t2);
-    fe_sq_cuda(t2, t2); for (i=1;i<9;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t1, t2, t1);
-    fe_sq_cuda(t2, t1); for (i=1;i<49;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t2, t2, t1);
-    fe_sq_cuda(t3, t2); for (i=1;i<99;i++) fe_sq_cuda(t3,t3);
-    fe_mul_cuda(t2, t3, t2);
-    fe_sq_cuda(t2, t2); for (i=1;i<49;i++) fe_sq_cuda(t2,t2);
-    fe_mul_cuda(t1, t2, t1);
-    fe_sq_cuda(t1, t1); for (i=1;i<4;i++) fe_sq_cuda(t1,t1);
-    fe_mul_cuda(out, t1, t0);
+    /* t0=z^2 */  fe_sq_cuda(t0,z);   for(i=1;i<1;i++)   fe_sq_cuda(t0,t0);
+    /* t1=z^8 */  fe_sq_cuda(t1,t0);  for(i=1;i<2;i++)   fe_sq_cuda(t1,t1);
+    /* t1=z^9 */  fe_mul_cuda(t1,z,t1);
+    /* t0=z^11 */ fe_mul_cuda(t0,t0,t1);                  /* t0 stays z^11 forever */
+    /* t2=z^22 */ fe_sq_cuda(t2,t0);  for(i=1;i<1;i++)   fe_sq_cuda(t2,t2);
+    /* t1=z^31 */ fe_mul_cuda(t1,t1,t2);
+    /* z^(2^10-2^5)  */ fe_sq_cuda(t2,t1);  for(i=1;i<5;i++)   fe_sq_cuda(t2,t2);
+    /* z^(2^10-1)    */ fe_mul_cuda(t1,t2,t1);
+    /* z^(2^20-2^10) */ fe_sq_cuda(t2,t1);  for(i=1;i<10;i++)  fe_sq_cuda(t2,t2);
+    /* z^(2^20-1)    */ fe_mul_cuda(t2,t2,t1);
+    /* z^(2^40-2^20) */ fe_sq_cuda(t3,t2);  for(i=1;i<20;i++)  fe_sq_cuda(t3,t3);
+    /* z^(2^40-1)    */ fe_mul_cuda(t2,t3,t2);
+    /* z^(2^50-2^10) */ fe_sq_cuda(t2,t2);  for(i=1;i<10;i++)  fe_sq_cuda(t2,t2);
+    /* z^(2^50-1)    */ fe_mul_cuda(t1,t2,t1);
+    /* z^(2^100-...) */ fe_sq_cuda(t2,t1);  for(i=1;i<50;i++)  fe_sq_cuda(t2,t2);
+    /* z^(2^100-1)   */ fe_mul_cuda(t2,t2,t1);
+    /* z^(2^200-...) */ fe_sq_cuda(t3,t2);  for(i=1;i<100;i++) fe_sq_cuda(t3,t3);
+    /* z^(2^200-1)   */ fe_mul_cuda(t2,t3,t2);
+    /* z^(2^250-...) */ fe_sq_cuda(t2,t2);  for(i=1;i<50;i++)  fe_sq_cuda(t2,t2);
+    /* z^(2^250-1)   */ fe_mul_cuda(t1,t2,t1);
+    /* z^(2^255-32)  */ fe_sq_cuda(t1,t1);  for(i=1;i<5;i++)   fe_sq_cuda(t1,t1);
+    /* z^(2^255-21)  */ fe_mul_cuda(out,t1,t0);
 }
 
 // Montgomery batch inversion on strided global memory.

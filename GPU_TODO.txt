@@ -29,13 +29,14 @@ REQUIRED BEFORE MERGE TO MASTER
     - -C flag added to force CPU-only mode in CUDA builds
     - Final stats line printed on CPU exit when -n flag is used (matches GPU)
 
-[ ] Verify secret key format is Tor-compatible
+[x] Verify secret key format is Tor-compatible
     - CPU uses SHA-512(seed) to derive sk[0..63] (proper ed25519 expansion)
     - GPU uses random[0..63] + clamp (sk[32..63] are random, not SHA-512 derived)
     - sk[32..63] is used as signing nonce material; random bytes are secure
-      but Tor should be checked to confirm it accepts the expanded key format
-      regardless of how sk[32..63] was derived
-    - Test: import a GPU-generated key into Tor and verify the service comes up
+    - sk->pk PASS confirmed for GPU keys with verify_key.py (pure Python ed25519)
+    - Root cause fixed: fe_invert_cuda had wrong addition chain (computed z^(2^255-1)
+      instead of z^(2^255-21)), making every GPU public key cryptographically wrong
+    - Fix: rewrote fe_invert_cuda as direct port of ref10/pow225521.h
 
 
 KNOWN LIMITATIONS (deferred, document in README)

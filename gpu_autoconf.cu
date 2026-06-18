@@ -3,6 +3,7 @@
 #include <string.h>
 #include <cuda_runtime.h>
 #include <sodium/randombytes.h>
+#include <sodium/utils.h>
 
 extern "C" {
 #include "types.h"
@@ -169,6 +170,7 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
 
     CUDA_CHECK(cudaMemcpy(st->d_start_pts, h_pts, pts_bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(st->d_start_sk,  h_sk,  sk_bytes,  cudaMemcpyHostToDevice));
+    sodium_memzero(h_sk, sk_bytes);
     free(h_pts);
     free(h_sk);
 
@@ -205,6 +207,9 @@ extern "C" void gpu_cleanup(struct gpu_state *st)
     CUDA_CHECK_VOID(cudaFree(st->d_tmp));
     CUDA_CHECK_VOID(cudaFree(st->d_start_pts));
     CUDA_CHECK_VOID(cudaFree(st->d_start_sk));
+    if (st->h_results)
+        sodium_memzero(st->h_results,
+                       (size_t)st->result_ring_size * sizeof(struct gpu_result));
     CUDA_CHECK_VOID(cudaFreeHost(st->h_results));  // mapped: free host ptr only
     CUDA_CHECK_VOID(cudaFreeHost((void *)st->h_done));
     CUDA_CHECK_VOID(cudaFree(st->d_result_head));
