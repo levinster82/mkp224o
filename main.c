@@ -34,6 +34,7 @@
 #endif
 
 #include "likely.h"
+#include "statline.h"
 
 #ifndef _WIN32
 #define FSZ "%zu"
@@ -814,12 +815,11 @@ cpu_workers:
 			if (!ireporttime)
 				ireporttime = 1;
 
-			double calcpersec = (1000000.0 * sumcalc) / (inowtime - istarttime);
-			double succpersec = (1000000.0 * sumsuccess) / (inowtime - istarttime);
-			double restpersec = (1000000.0 * sumrestart) / (inowtime - istarttime);
-			fprintf(stderr,">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
-				calcpersec,succpersec,restpersec,
-				(inowtime - istarttime + elapsedoffset) / 1000000.0);
+			u64 _w = inowtime - istarttime;
+			double calcpersec = _w ? (1000000.0 * sumcalc) / _w : 0.0;
+			print_stats_line(stderr, calcpersec,
+			    inowtime - istarttime + elapsedoffset,
+			    (u64)keysgenerated);
 
 			if (realtimestats) {
 				for (int i = 0;i < numthreads;++i) {
@@ -878,10 +878,7 @@ cpu_workers:
 		}
 		u64 elapsed = inowtime - istarttime + elapsedoffset;
 		double calcpersec = elapsed ? (1000000.0 * sumcalc) / elapsed : 0.0;
-		double succpersec = elapsed ? (1000000.0 * sumsuccess) / elapsed : 0.0;
-		double restpersec = elapsed ? (1000000.0 * sumrestart) / elapsed : 0.0;
-		fprintf(stderr,">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
-			calcpersec,succpersec,restpersec,elapsed / 1000000.0);
+		print_stats_line(stderr, calcpersec, elapsed, (u64)keysgenerated);
 	}
 #endif
 

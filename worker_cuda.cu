@@ -22,6 +22,7 @@ extern "C" {
 #include "filters.h"
 }
 #include "worker_cuda.h"
+#include "statline.h"
 
 // ── CUDA device headers ────────────────────────────────────────────────────
 #include "ed25519/cuda/fe_cuda.cuh"
@@ -325,7 +326,7 @@ static void *drain_thread(void *arg)
 
 #ifdef STATISTICS
     u64 istarttime, inowtime, ireporttime = 0, elapsedoffset = 0;
-    u64 sumcalc = 0, sumsuccess = 0;
+    u64 sumcalc = 0;
     u64 last_numcalc = 0;
     u64 local_success = 0; // independent of keysgenerated (only incremented under -n)
     {
@@ -365,7 +366,6 @@ static void *drain_thread(void *arg)
 
             u64 cur_calc = (u64)*st->h_numcalc;
             sumcalc    += cur_calc - last_numcalc;
-            sumsuccess  = local_success;
             last_numcalc = cur_calc;
 
             if (!ireporttime || (i64)(inowtime - ireporttime) >= (i64)da->reportdelay) {
@@ -378,15 +378,11 @@ static void *drain_thread(void *arg)
                 // Use window duration for rates; total elapsed for display.
                 u64 window  = inowtime - istarttime;
                 u64 elapsed = window + elapsedoffset;
-                double calcpersec = window ? 1000000.0 * (double)sumcalc    / window : 0.0;
-                double succpersec = window ? 1000000.0 * (double)sumsuccess / window : 0.0;
-                fprintf(stderr,
-                    ">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
-                    calcpersec, succpersec, 0.0, elapsed / 1000000.0);
+                double calcpersec = window ? 1000000.0 * (double)sumcalc / window : 0.0;
+                print_stats_line(stderr, calcpersec, elapsed, (u64)keysgenerated);
 
                 if (da->realtimestats) {
                     sumcalc    = 0;
-                    sumsuccess = 0;
                     local_success = 0;
                     elapsedoffset += window;
                     istarttime = inowtime;
@@ -403,11 +399,8 @@ static void *drain_thread(void *arg)
         inowtime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
         u64 elapsed = inowtime - istarttime + elapsedoffset;
         u64 total_calc = (u64)*st->h_numcalc;
-        double calcpersec = elapsed ? 1000000.0 * (double)total_calc   / elapsed : 0.0;
-        double succpersec = elapsed ? 1000000.0 * (double)local_success / elapsed : 0.0;
-        fprintf(stderr,
-            ">calc/sec:%8lf, succ/sec:%8lf, rest/sec:%8lf, elapsed:%5.6lfsec\n",
-            calcpersec, succpersec, 0.0, elapsed / 1000000.0);
+        double calcpersec = elapsed ? 1000000.0 * (double)total_calc / elapsed : 0.0;
+        print_stats_line(stderr, calcpersec, elapsed, (u64)keysgenerated);
     }
 #endif
 
