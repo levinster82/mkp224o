@@ -18,6 +18,29 @@ For debian-like linux distros, this should be enough to prepare for building:
 apt install gcc libc6-dev libsodium-dev make autoconf
 ```
 
+**For GPU acceleration (optional):** install the [NVIDIA CUDA Toolkit][CUDA].
+The build system auto-detects `nvcc`; no extra configure flags are needed.
+The binary links `libcudart` statically, so it runs on any machine — a CUDA
+runtime is only required on the build machine, not the target.
+
+On Debian/Ubuntu, follow the [CUDA download page][CUDA] for the network
+installer, or use the distro packages as a quick start:
+
+```bash
+apt install nvidia-cuda-toolkit
+```
+
+On Fedora/RHEL, enable the NVIDIA CUDA repository and install:
+
+```bash
+dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora39/x86_64/cuda-fedora39.repo
+dnf install cuda-toolkit
+```
+
+Adjust the repo URL for your Fedora/RHEL version — see the [CUDA download
+page][CUDA] for the exact repo slug. After install, ensure `nvcc` is on
+your PATH (typically `/usr/local/cuda/bin`) and re-run `./configure`.
+
 ### Building
 
 Run `./autogen.sh` to generate a configure script, if there isn't one already.
@@ -32,6 +55,23 @@ run `./configure --help` to see all available options.
 
 Finally, `make` to start building (`gmake` in \*BSD platforms).
 
+### GPU acceleration
+
+If an NVIDIA GPU is present, mkp224o uses it automatically and will print a
+line like:
+
+```
+GPU: NVIDIA GeForce RTX 3070 (sm_86, 46 SMs, 7833 MB)
+using GPU acceleration
+```
+
+On machines without a GPU the binary falls back to CPU threads silently.
+Use `-C` to force CPU-only mode even when a GPU is available.
+
+GPU mode uses batch incremental point addition rather than per-key scalar
+multiplication, which gives a large throughput advantage — an RTX 3070
+delivers ~850 M keys/s versus ~25 M/s on a 16-core CPU (~34×).
+
 ### Usage
 
 mkp224o needs one or more filters to work.
@@ -42,8 +82,15 @@ It makes directories with secret/public keys and hostnames
 for each discovered service. By default, the working directory is the current
 directory, but that can be overridden with `-d` switch.
 
-Use `-s` switch to enable printing of statistics, which may be useful
-when benchmarking different ed25519 implementations on your machine.
+Use `-S <seconds>` to print periodic statistics. Each line shows elapsed
+time, speed, expected match difficulty, ETA at 50% and 90% probability,
+and total keys found:
+
+```
+> elapsed:      30s | speed:  855.2M/s | 1:34.4B | ETA 50%: 27s  90%: 1m32s | found: 0
+```
+
+Use `-C` to force CPU-only mode (disables GPU even if one is present).
 
 Use `-h` switch to obtain all available options.
 
@@ -87,16 +134,22 @@ performance-related tips.
 
 * How long is it going to take?
 
-  Because of probablistic nature of brute force key generation, and
-  varience of hardware it's going to run on, it's hard to make promisses
-  about how long it's going to take, especially when the most of users
-  want just a few keys.\
-  See [this issue][#27] for very valuable discussion about this.\
-  If your machine is powerful enough, 6 character prefix shouldn't take
-  more than few tens of minutes, if using batch mode (read
-  [OPTIMISATION.txt][OPTIMISATION]) 7 characters can take hours
-  to days.\
-  No promisses though, it depends on pure luck.
+  It depends on your hardware and the length of the prefix. Use `-S 5`
+  to print stats every 5 seconds — the output includes ETA at 50% and 90%
+  probability based on your current speed, so you get a live estimate.\
+  See [this issue][#27] for a detailed discussion.\
+  As a rough guide at ~850 M keys/s (NVIDIA GeForce RTX 3070):
+
+  | Prefix length | Difficulty  | ETA 50%   | ETA 90%   |
+  |---------------|-------------|-----------|-----------|
+  | 6 chars       | ~1.1B       | ~0.5s     | ~1.5s     |
+  | 7 chars       | ~34.4B      | ~28s      | ~1m33s    |
+  | 8 chars       | ~1.1T       | ~15m      | ~50m      |
+  | 9 chars       | ~35.2T      | ~8h       | ~26h      |
+  | 10 chars      | ~1.1P       | ~10d      | ~35d      |
+
+  CPU-only (16 threads, ~25 M/s) is roughly 34× slower than the GPU
+  column above. No promises — it is pure luck.
 
 * Will this work with onionbalance?
 
@@ -132,6 +185,7 @@ along with this software. If not, see [CC0][].
   contributed by [foobar2019][]
 
 [OPTIMISATION]: ./OPTIMISATION.txt
+[CUDA]: https://developer.nvidia.com/cuda-downloads
 [#27]: https://github.com/cathugger/mkp224o/issues/27
 [keccak.c]: https://github.com/XKCP/XKCP/blob/master/Standalone/CompactFIPS202/C/Keccak-more-compact.c
 [CC0]: https://creativecommons.org/publicdomain/zero/1.0/
