@@ -258,10 +258,9 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             #pragma unroll
             for (int i = 0; i < 64; i++)
                 secret[32 + i] = base_sk[i];
-            // Add scalar offset to first 32 bytes of the private scalar.
-            // Step is 1 (not 8): cuda_ge_eightpoint = 1*B so each inner loop
-            // step adds 1*B — offset must match the actual point increment.
-            unsigned long long offset = counter + (unsigned long long)b;
+            // Step is 8*B: add 8 per inner-loop step so the scalar stays a
+            // multiple of 8 (clamping condition sk[0]&7==0 is preserved).
+            unsigned long long offset = 8ULL * (counter + (unsigned long long)b);
             addsztoscalar32_cuda(&secret[32], offset);
 
             // Sanity check (matches CPU's check)

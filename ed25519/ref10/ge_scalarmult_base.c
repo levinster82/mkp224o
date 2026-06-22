@@ -109,3 +109,29 @@ void ge_get_base_precomp(ge_precomp *out)
 {
   *out = base[0][0];
 }
+
+/* 8*B in ge_precomp (Duif/Z=1) form, for the GPU batch-increment step. */
+void ge_get_eightpoint_precomp(ge_precomp *out)
+{
+  static const unsigned char scalar8[32] = {8};
+  ge_p3 pt;
+  ge_cached cached;
+  fe z_inv, tmp;
+
+  ge_scalarmult_base(&pt, scalar8);
+
+  /* Normalize: compute Z^{-1} so we can store in the Z=1 precomp form. */
+  fe_invert(z_inv, pt.Z);
+
+  /* yplusx  = (Y+X) * Z_inv */
+  fe_add(tmp, pt.Y, pt.X);
+  fe_mul(out->yplusx, tmp, z_inv);
+
+  /* yminusx = (Y-X) * Z_inv */
+  fe_sub(tmp, pt.Y, pt.X);
+  fe_mul(out->yminusx, tmp, z_inv);
+
+  /* xy2d = 2d * T * Z_inv  (ge_p3_to_cached gives us T2d = 2d*T; dividing by Z gives xy2d) */
+  ge_p3_to_cached(&cached, &pt);
+  fe_mul(out->xy2d, cached.T2d, z_inv);
+}

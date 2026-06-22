@@ -98,6 +98,7 @@ extern void ge_add(ge_p1p1 *,const ge_p3 *,const ge_cached *);
 extern void ge_sub(ge_p1p1 *,const ge_p3 *,const ge_cached *);
 extern void ge_scalarmult_base(ge_p3 *,const unsigned char *);
 extern void ge_get_base_precomp(ge_precomp *);
+extern void ge_get_eightpoint_precomp(ge_precomp *);
 extern void ge_double_scalarmult_vartime(ge_p2 *,const unsigned char *,const ge_p3 *,const unsigned char *);
 
 #endif

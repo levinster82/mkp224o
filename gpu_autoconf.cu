@@ -24,6 +24,7 @@ typedef struct { fe_ref10 yplusx, yminusx, xy2d; } ge_precomp_ref10;
 extern "C" {
 void CRYPTO_NAMESPACE(ge_scalarmult_base)(ge_p3_ref10 *, const unsigned char *);
 void CRYPTO_NAMESPACE(ge_get_base_precomp)(ge_precomp_ref10 *);
+void CRYPTO_NAMESPACE(ge_get_eightpoint_precomp)(ge_precomp_ref10 *);
 }
 
 #define CUDA_CHECK(call) \
@@ -120,15 +121,16 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
     int total_threads = cfg->num_blocks * cfg->threads_per_block;
     int B = cfg->batchnum;
 
-    // Copy the generator B (= 1*B = base[0][0]) into __constant__ memory.
-    // The kernel steps by +1*B per inner loop iteration; the sk offset tracks
-    // the same step of 1. ge_precomp and ge_precomp_cuda are layout-identical.
-    ge_precomp_ref10 base_precomp;
-    CRYPTO_NAMESPACE(ge_get_base_precomp)(&base_precomp);
+    // Copy 8*B into __constant__ memory. The kernel steps by +8*B per inner
+    // loop iteration; the sk offset adds 8 per step so clamped scalars stay
+    // clamped (sk[0]&7==0 is preserved). ge_precomp and ge_precomp_cuda are
+    // layout-identical (same int32_t[10] fields in the same order).
+    ge_precomp_ref10 eightpt_ref;
+    CRYPTO_NAMESPACE(ge_get_eightpoint_precomp)(&eightpt_ref);
     ge_precomp_cuda eightpt_host;
-    memcpy(eightpt_host.yplusx,  base_precomp.yplusx,  10 * sizeof(int32_t));
-    memcpy(eightpt_host.yminusx, base_precomp.yminusx, 10 * sizeof(int32_t));
-    memcpy(eightpt_host.xy2d,    base_precomp.xy2d,    10 * sizeof(int32_t));
+    memcpy(eightpt_host.yplusx,  eightpt_ref.yplusx,  10 * sizeof(int32_t));
+    memcpy(eightpt_host.yminusx, eightpt_ref.yminusx, 10 * sizeof(int32_t));
+    memcpy(eightpt_host.xy2d,    eightpt_ref.xy2d,    10 * sizeof(int32_t));
     CUDA_CHECK(cudaMemcpyToSymbol(cuda_ge_eightpoint, &eightpt_host, sizeof(ge_precomp_cuda)));
 
     // Batch buffers: xyz [B×30×stride], tmp [B×10×stride]
