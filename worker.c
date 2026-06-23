@@ -78,17 +78,17 @@ void onionready(char *sname,const u8 *secret,const u8 *pubonion,int warnnear)
 	if (endwork)
 		return;
 
-	if (numneedgenerate) {
-		pthread_mutex_lock(&keysgenerated_mutex);
-		if (keysgenerated >= numneedgenerate) {
-			pthread_mutex_unlock(&keysgenerated_mutex);
-			return;
-		}
-		++keysgenerated;
-		if (keysgenerated == numneedgenerate)
-			endwork = 1;
+	/* Always count every hit so the "found:" stat reflects reality even
+	   without -n. The -n quota only governs the early-out and endwork stop. */
+	pthread_mutex_lock(&keysgenerated_mutex);
+	if (numneedgenerate && keysgenerated >= numneedgenerate) {
 		pthread_mutex_unlock(&keysgenerated_mutex);
+		return;
 	}
+	++keysgenerated;
+	if (numneedgenerate && keysgenerated == numneedgenerate)
+		endwork = 1;
+	pthread_mutex_unlock(&keysgenerated_mutex);
 
 	// disabled as this was never ever triggered as far as I'm aware
 #if 0
