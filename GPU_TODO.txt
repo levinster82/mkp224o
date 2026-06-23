@@ -54,7 +54,8 @@ KNOWN LIMITATIONS (deferred, document in README)
 [x] GPU throughput statistics — IMPLEMENTED
     - Block-level atomicAdd to mapped pinned h_numcalc in kernel (184 atomics/batch)
     - Drain thread reports calc/sec and succ/sec on same schedule as CPU -s flag
-    - succ/sec tracked locally (keysgenerated only increments under -n)
+    - keysgenerated counts every found key (shown as "found:"), independent
+      of the -n quota which only governs the early-out and stop condition
     - Tested: ~850M calc/sec on RTX 3070, succ/sec correct for testte prefix
 
 
