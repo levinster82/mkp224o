@@ -311,58 +311,29 @@ fe_invert_cuda(fe_cuda out, const fe_cuda z)
     /* z^(2^255-21)  */ fe_mul_cuda(out,t1,t0);
 }
 
-// Montgomery batch inversion on strided global memory.
-// zbuf layout:    int32_t[n * zstep * stride + zoff * stride]
-//   slot b, limb li → zbuf[(b * zstep + zoff + li) * stride + tid]
-// tmpbuf layout:  int32_t[n * 10 * stride]
-//   slot b, limb li → tmpbuf[(b * 10 + li) * stride + tid]
-// After return, zbuf's Z fields contain the inverses of the original Z values.
-//
-// For a standalone Z buffer: zstep=10, zoff=0
-// For an XYZ buffer (X=0..9, Y=10..19, Z=20..29 within each 30-element slot):
-//   zstep=30, zoff=20
+// Forward half of Montgomery batch inversion only: writes the prefix products
+// into tmpbuf and returns acc = (product of all Z)^-1. The caller does the
+// backward pass itself so it can consume each Z^-1 inline (e.g. convert to bytes
+// and filter) without writing the inverted Z back to global memory.
+//   backward step for slot b (high→low): zinv = acc * tmpbuf[b]; acc *= Z[b];
 static __device__ void
-fe_batchinvert_cuda(int32_t * __restrict__ zbuf,
-                    int32_t * __restrict__ tmpbuf,
-                    int n, int zstep, int zoff, int stride, int tid)
+fe_batch_prefix_invert_cuda(const int32_t * __restrict__ zbuf,
+                            int32_t * __restrict__ tmpbuf,
+                            fe_cuda acc,
+                            int n, int zstep, int zoff, int stride, int tid)
 {
-    fe_cuda acc, z, tmp;
+    fe_cuda z;
     fe_1_cuda(acc);
-
-    // Forward pass: store prefix products in tmpbuf
     for (int b = 0; b < n; b++) {
-        // save acc → tmpbuf[b]
+        // save running product acc → tmpbuf[b]
         #pragma unroll
         for (int li = 0; li < 10; li++)
             tmpbuf[(b * 10 + li) * stride + tid] = acc[li];
-        // load Z[b] from strided position
+        // load Z[b]
         #pragma unroll
         for (int li = 0; li < 10; li++)
             z[li] = zbuf[(b * zstep + zoff + li) * stride + tid];
-        fe_mul_cuda(acc, acc, z);
+        fe_mul_cuda(acc, acc, z); // fe_mul copies inputs first, so aliasing is safe
     }
-
     fe_invert_cuda(acc, acc);
-
-    // Backward pass: compute per-element inverses
-    for (int b = n - 1; b >= 0; b--) {
-        // load original Z[b]
-        #pragma unroll
-        for (int li = 0; li < 10; li++)
-            z[li] = zbuf[(b * zstep + zoff + li) * stride + tid];
-        // load prefix product
-        #pragma unroll
-        for (int li = 0; li < 10; li++)
-            tmp[li] = tmpbuf[(b * 10 + li) * stride + tid];
-        // Z[b]^-1 = acc * prefix
-        fe_cuda zinv;
-        fe_mul_cuda(zinv, acc, tmp);
-        // store inverse back into Z field
-        #pragma unroll
-        for (int li = 0; li < 10; li++)
-            zbuf[(b * zstep + zoff + li) * stride + tid] = zinv[li];
-        // advance: acc = acc * original_Z[b]
-        fe_mul_cuda(tmp, acc, z);
-        fe_copy_cuda(acc, tmp);
-    }
 }

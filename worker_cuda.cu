@@ -194,20 +194,28 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             ge_add_eightpoint_cuda(&ge_pub);
         }
 
-        // ── Batch inversion of Z coordinates ───────────────────────────
-        // batch_xyz Z at slot b: offset (b*20 + 10 + li)*stride + tid
-        // After this call, Z fields contain Z_inv values.
-        fe_batchinvert_cuda(args.batch_xyz, args.tmp, B, 20, 10, stride, tid);
+        // ── Batch inversion forward pass ───────────────────────────────
+        // Prefix products into tmp; acc = (product of all Z)^-1.
+        // Z field at slot b: offset (b*20 + 10 + li)*stride + tid.
+        fe_cuda acc;
+        fe_batch_prefix_invert_cuda(args.batch_xyz, args.tmp, acc, B, 20, 10, stride, tid);
 
-        // ── Convert each slot to bytes and check filter ─────────────────
-        for (int b = 0; b < B; b++) {
-            // Load Y, Z_inv for this slot
-            fe_cuda Y, Zinv;
+        // ── Fused backward pass: derive each Z^-1 and check inline ──────
+        // Iterates b high→low. acc is advanced (acc *= Z[b]) every iteration
+        // before any early-out, so the inverted Z is consumed in-register and
+        // never written back to global memory.
+        for (int b = B - 1; b >= 0; b--) {
+            fe_cuda Y, Z, prefix, Zinv;
             #pragma unroll
             for (int li = 0; li < 10; li++) {
-                Y[li]    = args.batch_xyz[(b * 20 + 0*10 + li) * stride + tid];
-                Zinv[li] = args.batch_xyz[(b * 20 + 1*10 + li) * stride + tid];
+                Z[li]      = args.batch_xyz[(b * 20 + 1*10 + li) * stride + tid];
+                prefix[li] = args.tmp[(b * 10 + li) * stride + tid];
             }
+            fe_mul_cuda(Zinv, acc, prefix); // Z[b]^-1 = acc * prefix[b]
+            fe_mul_cuda(acc, acc, Z);       // advance acc for the next slot
+            #pragma unroll
+            for (int li = 0; li < 10; li++)
+                Y[li] = args.batch_xyz[(b * 20 + 0*10 + li) * stride + tid];
 
             // Compute the sign-less public key y = Y*Z_inv. The x-sign bit is
             // left clear; it never affects a vanity prefix and the CPU drain
