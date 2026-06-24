@@ -20,7 +20,11 @@ struct gpu_state {
     struct gpu_config cfg;
 
     // Device buffers
-    int32_t *d_batch_xyz;  // [batchnum * 30 * total_threads] int32 — X,Y,Z per slot
+    int32_t *d_batch_xyz;  // [batchnum * 20 * total_threads] int32 — Y,Z per slot
+                           // (X is not stored: it only affects the pubkey sign
+                           // bit, which never lands in a vanity prefix, so the
+                           // GPU filters on the sign-less key and the CPU drain
+                           // thread recomputes the exact key on a hit.)
     int32_t *d_tmp;        // [batchnum * 10 * total_threads] int32 — prefix products
 
     // Starting points: one ge_p3 (40 int32) + secret key (64 bytes) per thread
@@ -46,12 +50,14 @@ struct gpu_state {
     unsigned long long          *d_numcalc; // GPU writes via atomicAdd
 };
 
-// One matched key pair returned to CPU drain thread
-#define GPU_RESULT_PUBONION_LEN (32 + 32 + 3)   // prefix(32) + pk(32) + checksum(2) + version(1)
+// One matched candidate returned to CPU drain thread. The GPU emits only the
+// secret scalar; the drain thread recomputes the exact public key (correct
+// sign), checksum and onion address from it. PUBONION_LEN is the size of that
+// CPU-side buffer: prefix(32) + pk(32) + checksum(2) + version(1).
+#define GPU_RESULT_PUBONION_LEN (32 + 32 + 3)
 #define GPU_RESULT_SECRET_LEN   (32 + 64)        // prefix(32) + sk(64)
 
 struct gpu_result {
-    uint8_t pubonion[GPU_RESULT_PUBONION_LEN];
     uint8_t secret[GPU_RESULT_SECRET_LEN];
 };
 
