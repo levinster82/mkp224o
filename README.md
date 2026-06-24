@@ -70,7 +70,7 @@ Use `-C` to force CPU-only mode even when a GPU is available.
 
 GPU mode uses batch incremental point addition rather than per-key scalar
 multiplication, which gives a large throughput advantage — an RTX 3070
-delivers ~850 M keys/s versus ~25 M/s on a 16-core CPU (~34×).
+delivers ~1.0 G keys/s versus ~25 M/s on a 16-core CPU (~40×).
 
 #### Multiple GPUs
 
