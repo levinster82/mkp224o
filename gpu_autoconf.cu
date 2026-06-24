@@ -94,12 +94,35 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
     // 60% of VRAM budget for batch buffers
     size_t vram_budget = (size_t)((double)prop.totalGlobalMem * 0.60);
 
-    // Each thread×slot needs 40 int32 (30 for xyz + 10 for tmp prefix product)
-    size_t bytes_per_thread_per_slot = 40 * sizeof(int32_t);
+    // Each thread×slot needs 30 int32 (20 for Y,Z + 10 for tmp prefix product)
+    size_t bytes_per_thread_per_slot = 30 * sizeof(int32_t);
     size_t max_batchnum = vram_budget / ((size_t)total_threads * bytes_per_thread_per_slot);
     if (max_batchnum < 1) max_batchnum = 1;
 
     int batchnum = clamp_pow2((int)max_batchnum, 64, 1024);
+
+    // Experiment knob: MKP_BATCHNUM=64|128|256|512|1024 overrides the
+    // capacity-based auto pick so we can tune the memory/compute tradeoff
+    // (smaller batch = more inversions but less global-memory traffic).
+    // Must be one of the instantiated template values.
+    {
+        const char *bn = getenv("MKP_BATCHNUM");
+        if (bn && *bn) {
+            int v = atoi(bn);
+            if (v != 64 && v != 128 && v != 256 && v != 512 && v != 1024) {
+                if (!quiet)
+                    fprintf(stderr, "MKP_BATCHNUM=%s ignored (must be 64,128,256,512,1024)\n", bn);
+            } else if ((size_t)v * bytes_per_thread_per_slot * (size_t)total_threads > vram_budget) {
+                // Forcing a batchnum the budget can't fit would exhaust VRAM and
+                // hang at allocation/launch — refuse it instead.
+                if (!quiet)
+                    fprintf(stderr, "MKP_BATCHNUM=%d ignored: needs more than the %zu MB VRAM budget; using %d\n",
+                            v, (size_t)(vram_budget >> 20), batchnum);
+            } else {
+                batchnum = v;
+            }
+        }
+    }
 
     cfg->num_blocks       = num_blocks;
     cfg->threads_per_block = tpb;
@@ -133,8 +156,8 @@ extern "C" int gpu_init(struct gpu_state *st, int quiet)
     memcpy(eightpt_host.xy2d,    eightpt_ref.xy2d,    10 * sizeof(int32_t));
     CUDA_CHECK(cudaMemcpyToSymbol(cuda_ge_eightpoint, &eightpt_host, sizeof(ge_precomp_cuda)));
 
-    // Batch buffers: xyz [B×30×stride], tmp [B×10×stride]
-    size_t xyz_bytes = (size_t)B * 30 * total_threads * sizeof(int32_t);
+    // Batch buffers: yz [B×20×stride] (Y,Z only — X is not stored), tmp [B×10×stride]
+    size_t xyz_bytes = (size_t)B * 20 * total_threads * sizeof(int32_t);
     size_t tmp_bytes = (size_t)B * 10 * total_threads * sizeof(int32_t);
     CUDA_CHECK(cudaMalloc(&st->d_batch_xyz, xyz_bytes));
     CUDA_CHECK(cudaMalloc(&st->d_tmp,       tmp_bytes));

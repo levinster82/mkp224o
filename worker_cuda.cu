@@ -32,6 +32,18 @@ extern "C" {
 // Definition of the shared constant-memory eightpoint (extern-declared in ge_cuda.cuh)
 __constant__ ge_precomp_cuda cuda_ge_eightpoint;
 
+// Host-side ref10 ed25519, used by the CPU drain thread to recompute the exact
+// public key (with correct x sign) from an emitted scalar. ge_p3_ref10 is
+// layout-identical to ref10 ge_p3 (four int32[10] fields). Namespaced to match
+// however the ed25519 impl was compiled (the ref10 objects are always linked
+// for the GPU build).
+typedef int32_t fe_ref10[10];
+typedef struct { fe_ref10 X, Y, Z, T; } ge_p3_ref10;
+extern "C" {
+void CRYPTO_NAMESPACE(ge_scalarmult_base)(ge_p3_ref10 *, const unsigned char *);
+void CRYPTO_NAMESPACE(ge_p3_tobytes)(unsigned char *, const ge_p3_ref10 *);
+}
+
 // ── Filter state in constant memory ───────────────────────────────────────
 // We support INTFILTER (fast uint64) and BINFILTER (byte array) on GPU.
 // PCRE2FILTER is CPU-only.
@@ -51,14 +63,12 @@ struct gpu_filter_entry {
 
 __constant__ struct gpu_filter_entry cuda_filter_table[GPU_MAX_FILTERS];
 __constant__ int cuda_filter_count;
-// checksumstr, pkprefix, skprefix for key formatting
-__constant__ uint8_t cuda_pkprefix[32];
+// skprefix is prepended to the emitted secret scalar by the kernel.
 __constant__ uint8_t cuda_skprefix[32];
-__constant__ uint8_t cuda_checksumstr[16]; // ".onion checksum" + 0 padding
 
 // ── Kernel argument block ──────────────────────────────────────────────────
 struct kernel_args {
-    int32_t *batch_xyz;        // [B * 30 * stride] — X,Y,Z per batch slot
+    int32_t *batch_xyz;        // [B * 20 * stride] — Y,Z per batch slot (no X)
     int32_t *tmp;              // [B * 10 * stride] — scratch for batchinvert
     int32_t *start_pts;        // [stride * 40]     — starting ge_p3 per thread
     uint8_t *start_sk;         // [stride * 64]     — base secret key per thread
@@ -173,36 +183,37 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
     while (!*args.endwork_flag) {
         // ── Inner loop: accumulate B ge_p3 candidates ──────────────────
         for (int b = 0; b < B; b++) {
-            // Store X, Y, Z in batch buffer (T not needed for tobytes)
+            // Store Y, Z in batch buffer (X not needed — only affects the sign
+            // bit; T not needed for tobytes). Slot layout: Y=0..9, Z=10..19.
             #pragma unroll
             for (int li = 0; li < 10; li++) {
-                args.batch_xyz[(b * 30 + 0*10 + li) * stride + tid] = ge_pub.X[li];
-                args.batch_xyz[(b * 30 + 1*10 + li) * stride + tid] = ge_pub.Y[li];
-                args.batch_xyz[(b * 30 + 2*10 + li) * stride + tid] = ge_pub.Z[li];
+                args.batch_xyz[(b * 20 + 0*10 + li) * stride + tid] = ge_pub.Y[li];
+                args.batch_xyz[(b * 20 + 1*10 + li) * stride + tid] = ge_pub.Z[li];
             }
             // Advance: ge_pub += ge_eightpoint
             ge_add_eightpoint_cuda(&ge_pub);
         }
 
         // ── Batch inversion of Z coordinates ───────────────────────────
-        // batch_xyz Z at slot b: offset (b*30 + 20 + li)*stride + tid
+        // batch_xyz Z at slot b: offset (b*20 + 10 + li)*stride + tid
         // After this call, Z fields contain Z_inv values.
-        fe_batchinvert_cuda(args.batch_xyz, args.tmp, B, 30, 20, stride, tid);
+        fe_batchinvert_cuda(args.batch_xyz, args.tmp, B, 20, 10, stride, tid);
 
         // ── Convert each slot to bytes and check filter ─────────────────
         for (int b = 0; b < B; b++) {
-            // Load X, Y, Z_inv for this slot
-            fe_cuda X, Y, Zinv;
+            // Load Y, Z_inv for this slot
+            fe_cuda Y, Zinv;
             #pragma unroll
             for (int li = 0; li < 10; li++) {
-                X[li]    = args.batch_xyz[(b * 30 + 0*10 + li) * stride + tid];
-                Y[li]    = args.batch_xyz[(b * 30 + 1*10 + li) * stride + tid];
-                Zinv[li] = args.batch_xyz[(b * 30 + 2*10 + li) * stride + tid];
+                Y[li]    = args.batch_xyz[(b * 20 + 0*10 + li) * stride + tid];
+                Zinv[li] = args.batch_xyz[(b * 20 + 1*10 + li) * stride + tid];
             }
 
-            // Compute y = Y/Z = Y*Z_inv, x = X/Z = X*Z_inv
+            // Compute the sign-less public key y = Y*Z_inv. The x-sign bit is
+            // left clear; it never affects a vanity prefix and the CPU drain
+            // thread recomputes the exact key (with sign) on a match.
             uint8_t pk[32];
-            ge_p3_tobytes_batched_cuda(pk, X, Y, Zinv);
+            ge_y_tobytes_batched_cuda(pk, Y, Zinv);
 
             // ── Filter check ─────────────────────────────────────────────
             int fi = gpu_check_filter(pk);
@@ -226,32 +237,11 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
                 if (!multiword_ok) continue;
             }
 
-            // ── Found a match ─────────────────────────────────────────────
-
-            // Build formatted public key with checksum
-            // pubonion = pkprefix(32) + pk(32) + checksum(2) + version(1)
-            uint8_t pubonion[GPU_RESULT_PUBONION_LEN];
-            #pragma unroll
-            for (int i = 0; i < 32; i++)
-                pubonion[i] = cuda_pkprefix[i];
-            #pragma unroll
-            for (int i = 0; i < 32; i++)
-                pubonion[32 + i] = pk[i];
-
-            // Compute SHA3-256(".onion checksum" + pk + 0x03) → checksum[2 bytes]
-            uint8_t hashsrc[48]; // 15 + 32 + 1
-            #pragma unroll
-            for (int i = 0; i < 15; i++)
-                hashsrc[i] = cuda_checksumstr[i];
-            #pragma unroll
-            for (int i = 0; i < 32; i++)
-                hashsrc[15 + i] = pk[i];
-            hashsrc[47] = 0x03;
-            uint8_t chksum[32];
-            sha3_256_cuda(chksum, hashsrc, 48);
-            pubonion[64] = chksum[0];
-            pubonion[65] = chksum[1];
-            pubonion[66] = 0x03; // version
+            // ── Found a candidate ─────────────────────────────────────────
+            // Emit only the secret scalar. The CPU drain thread recomputes the
+            // exact public key (correct x sign), checksum and onion address —
+            // cheap because matches are astronomically rare. This keeps SHA3
+            // and key formatting out of the hot kernel (fewer registers).
 
             // Build secret: skprefix + (base_sk + counter_offset)
             uint8_t secret[GPU_RESULT_SECRET_LEN];
@@ -280,9 +270,6 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             while (args.done[slot] && !*args.endwork_flag) { /* spin */ }
             if (*args.endwork_flag) return;
             struct gpu_result *res = &args.results[slot];
-            #pragma unroll
-            for (int i = 0; i < GPU_RESULT_PUBONION_LEN; i++)
-                res->pubonion[i] = pubonion[i];
             #pragma unroll
             for (int i = 0; i < GPU_RESULT_SECRET_LEN; i++)
                 res->secret[i] = secret[i];
@@ -349,10 +336,32 @@ static void *drain_thread(void *arg)
         while (st->h_done[read_idx]) {
             struct gpu_result *hres = &st->h_results[read_idx];
 
+            // The GPU emitted only the secret scalar. Recompute the exact
+            // public key (with correct x sign) from it, then build the formatted
+            // pubonion: pkprefix(32) + pk(32) + checksum(2) + version(1).
+            static const char checksumstr[] = ".onion checksum"; // 15 bytes
+            const uint8_t *sk = hres->secret + 32; // expanded sk; scalar in [0..31]
+            uint8_t pubonion[GPU_RESULT_PUBONION_LEN];
+            memcpy(pubonion, pkprefix, 32);
+
+            ge_p3_ref10 pt;
+            CRYPTO_NAMESPACE(ge_scalarmult_base)(&pt, sk);
+            CRYPTO_NAMESPACE(ge_p3_tobytes)(&pubonion[32], &pt);
+
+            uint8_t hashsrc[15 + 32 + 1];
+            memcpy(hashsrc, checksumstr, 15);
+            memcpy(&hashsrc[15], &pubonion[32], 32);
+            hashsrc[47] = 0x03; // version
+            uint8_t chk[FIPS202_SHA3_256_LEN];
+            FIPS202_SHA3_256(hashsrc, sizeof(hashsrc), chk);
+            pubonion[64] = chk[0];
+            pubonion[65] = chk[1];
+            pubonion[66] = 0x03; // version
+
             char *sname = makesname();
             if (sname) {
-                strcpy(base32_to(&sname[direndpos], hres->pubonion + 32, 35), ".onion");
-                onionready(sname, hres->secret, hres->pubonion, 0);
+                strcpy(base32_to(&sname[direndpos], pubonion + 32, 35), ".onion");
+                onionready(sname, hres->secret, pubonion, 0);
                 free(sname);
             }
 #ifdef STATISTICS
@@ -512,11 +521,10 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
     // Upload filter table to constant memory
     if (upload_filters() < 0) { gpu_cleanup(&st); return -1; }
 
-    // Upload pkprefix, skprefix, checksumstr to constant memory
-    static const char checksumstr_local[] = ".onion checksum";
-    CUDA_CHECK_LAUNCH(cudaMemcpyToSymbol(cuda_pkprefix,    pkprefix,           32));
-    CUDA_CHECK_LAUNCH(cudaMemcpyToSymbol(cuda_skprefix,    skprefix,           32));
-    CUDA_CHECK_LAUNCH(cudaMemcpyToSymbol(cuda_checksumstr, checksumstr_local,   15));
+    // Upload skprefix to constant memory (used by the kernel to build the
+    // emitted secret). pkprefix/checksumstr are no longer needed on the GPU —
+    // the CPU drain thread formats the public key on a match.
+    CUDA_CHECK_LAUNCH(cudaMemcpyToSymbol(cuda_skprefix, skprefix, 32));
 
     // Build kernel_args
     struct kernel_args kargs;

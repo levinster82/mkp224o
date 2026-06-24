@@ -78,6 +78,18 @@ ge_p3_tobytes_batched_cuda(uint8_t *s, const fe_cuda X, const fe_cuda Y, const f
     s[31] ^= (uint8_t)(fe_isnegative_cuda(x) << 7);
 }
 
+// Sign-less batch tobytes: pack y = Y/Z only, leaving the x-sign bit (byte 31,
+// bit 7) clear. X is not needed. Valid for filtering because a vanity prefix
+// never reaches byte 31; the exact key (with sign) is recomputed on the CPU
+// when a candidate matches.
+static __device__ __forceinline__ void
+ge_y_tobytes_batched_cuda(uint8_t *s, const fe_cuda Y, const fe_cuda z_inv)
+{
+    fe_cuda y;
+    fe_mul_cuda(y, Y, z_inv);
+    fe_tobytes_cuda(s, y);
+}
+
 // Helpers to store/load X,Y,Z limbs in strided global memory.
 // Buffer layout: int32_t[BATCHNUM * 30 * stride], coordinates packed as:
 //   slot b, field f (0=X,1=Y,2=Z), limb li → index (b*30 + f*10 + li)*stride + tid
