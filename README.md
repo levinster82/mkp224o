@@ -72,6 +72,32 @@ GPU mode uses batch incremental point addition rather than per-key scalar
 multiplication, which gives a large throughput advantage — an RTX 3070
 delivers ~850 M keys/s versus ~25 M/s on a 16-core CPU (~34×).
 
+#### Multiple GPUs
+
+A single mkp224o process uses **one** GPU (the first CUDA device). To use
+every card in a multi-GPU system, launch one process per card and pin each to
+a different device with `CUDA_VISIBLE_DEVICES`:
+
+```
+CUDA_VISIBLE_DEVICES=0 ./mkp224o -S 3600 -d out0 myprefix &
+CUDA_VISIBLE_DEVICES=1 ./mkp224o -S 3600 -d out1 myprefix &
+CUDA_VISIBLE_DEVICES=2 ./mkp224o -S 3600 -d out2 myprefix &
+wait
+```
+
+Each process seeds its own independent random starting points, so the
+processes never duplicate each other's work, and combined throughput scales
+linearly with the number of cards. Give each a separate output directory
+(`-d`) so their stats and key output don't interleave.
+
+This works with **mismatched card models** too: each process runs its own
+auto-configuration against the card it is pinned to, sizing the batch to that
+card's SM count and VRAM, and the processes run fully independently — a slower
+card never holds back a faster one. Note that each process prints its own
+`-S` statistics and its own ETA based on its own speed; the effective search
+rate is the **sum** of the per-process speeds (so divide the displayed ETAs by
+the number of identical cards, or sum the speeds for mixed cards).
+
 ### Usage
 
 mkp224o needs one or more filters to work.
