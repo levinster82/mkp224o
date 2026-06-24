@@ -25,12 +25,16 @@ path out of the profile so we measure the real steady-state hot loop.
 
 ```bash
 nsys profile \
-  --gpu-metrics-device=all \
+  --gpu-metrics-devices=all \
   --duration=10 \
   --force-overwrite=true \
   -o mkp_nsys \
   ./mkp224o -S 5 b32profiling
 ```
+
+> Older nsys used `--gpu-metrics-device` (singular); recent versions want
+> `--gpu-metrics-devices`. If you hit `ERR_NVGPUCTRPERM` / "Insufficient
+> privilege", see the permissions note at the bottom.
 
 Then summarize:
 
@@ -113,5 +117,15 @@ Read back (paste these numbers):
   kernel loop and launch setup. A run with it set prints a `PROFILE:` line.
 - Use a real **hard** prefix; do not profile with an easy prefix or the result
   path will fire and pollute the measurement.
-- If `nsys`/`ncu` need elevated GPU counter access, the box may require
-  `sudo` or setting NVIDIA's profiling-permissions (`NVreg_RestrictProfilingToAdminUsers=0`).
+- **GPU counter permissions (`ERR_NVGPUCTRPERM`).** By default only root can
+  read GPU performance counters. Two fixes:
+  - Per-run: prefix with `sudo` (for `ncu`, pass the env var through with
+    `sudo env MKP_PROFILE_ITERS=8192 ncu ...`).
+  - Persistent (recommended for repeated runs):
+    ```bash
+    echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' \
+      | sudo tee /etc/modprobe.d/nvidia-profiler.conf
+    sudo dracut --force   # rebuild initramfs (Fedora)
+    sudo reboot
+    ```
+    After reboot, run the commands above as your normal user.
