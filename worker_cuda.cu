@@ -70,6 +70,9 @@ struct kernel_args {
     int result_ring_size;
     int stride;                // total_threads = gridDim.x * blockDim.x
     int numwords;
+    unsigned long long max_iters; // 0 = run forever; >0 = stop after this many
+                                  // candidates/thread (profiling only, set via
+                                  // MKP_PROFILE_ITERS so ncu sees a finite kernel)
 };
 
 // ── Secret key multi-byte addition ────────────────────────────────────────
@@ -292,6 +295,11 @@ __global__ void worker_cuda_kernel(struct kernel_args args)
             atomicAdd(args.numcalc, (unsigned long long)blockDim.x * B);
 
         counter += (unsigned long long)B;
+
+        // Profiling cap: when MKP_PROFILE_ITERS is set the kernel becomes a
+        // finite workload so Nsight Compute can replay it. 0 = normal (forever).
+        if (args.max_iters && counter >= args.max_iters)
+            break;
     }
 }
 
@@ -526,6 +534,20 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
     kargs.endwork_flag     = st.d_endwork;
     kargs.numcalc          = st.d_numcalc;
 
+    // Profiling hook: MKP_PROFILE_ITERS=N makes the persistent kernel exit
+    // after ~N candidates/thread so tools that replay/await the kernel
+    // (e.g. Nsight Compute) get a finite workload. Unset = run forever.
+    kargs.max_iters = 0;
+    {
+        const char *pi = getenv("MKP_PROFILE_ITERS");
+        if (pi && *pi) {
+            kargs.max_iters = strtoull(pi, NULL, 10);
+            if (!quiet && kargs.max_iters)
+                fprintf(stderr, "PROFILE: kernel will stop after %llu candidates/thread\n",
+                        kargs.max_iters);
+        }
+    }
+
     // Start CPU drain thread
     struct drain_args da = { &st, quiet
 #ifdef STATISTICS
@@ -553,6 +575,11 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
 
     // Wait for kernel to finish (endwork=1 causes kernel to return)
     cudaDeviceSynchronize();
+
+    // If a profiling cap made the kernel self-terminate, the drain thread is
+    // still spinning on the global endwork flag — set it so it can exit.
+    if (kargs.max_iters)
+        endwork = 1;
 
     // Wait for drain thread to finish
     pthread_join(drain, 0);
