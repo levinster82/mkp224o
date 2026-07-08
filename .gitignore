@@ -7,6 +7,9 @@ test_*
 # generated onions
 *.onion
 
+# local Claude Code settings (personal, not shared)
+.claude/
+
 # garbage
 configure
 configure~
