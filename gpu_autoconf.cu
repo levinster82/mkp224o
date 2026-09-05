@@ -99,7 +99,23 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
     size_t max_batchnum = vram_budget / ((size_t)total_threads * bytes_per_thread_per_slot);
     if (max_batchnum < 1) max_batchnum = 1;
 
-    int batchnum = clamp_pow2((int)max_batchnum, 64, 1024);
+    // The kernel indexes d_batch_xyz as slot*20*total_threads + ... using
+    // int32 arithmetic; the largest valid index must fit in INT32_MAX.
+    // On high-VRAM cards (e.g. RTX 4090 24 GB, 128 SMs) the VRAM-based
+    // max_batchnum can exceed this — silent kernel death with illegal
+    // memory access. Cap by the index limit too.
+    size_t max_batchnum_by_index =
+        (size_t)0x7FFFFFFF / ((size_t)20 * (size_t)total_threads);
+    if (max_batchnum > max_batchnum_by_index)
+        max_batchnum = max_batchnum_by_index;
+    if (max_batchnum < 1) max_batchnum = 1;
+
+    // Pick the largest instantiated batchnum (∈ {64,128,256,512,1024}) that
+    // fits in max_batchnum. Must floor (never round up), otherwise we'd
+    // exceed either the VRAM budget or the int32 index cap above.
+    int batchnum = 1024;
+    while (batchnum > 64 && (size_t)batchnum > max_batchnum)
+        batchnum >>= 1;
 
     // Experiment knob: MKP_BATCHNUM=64|128|256|512|1024 overrides the
     // capacity-based auto pick so we can tune the memory/compute tradeoff
