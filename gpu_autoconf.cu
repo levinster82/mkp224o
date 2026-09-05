@@ -60,23 +60,36 @@ static int clamp_pow2(int n, int lo, int hi)
     return p;
 }
 
-extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
+extern "C" int gpu_device_count(void)
+{
+    int dev_count = 0;
+    if (cudaGetDeviceCount(&dev_count) != cudaSuccess)
+        return 0;
+    return dev_count;
+}
+
+extern "C" int gpu_autoconf(int device_idx, struct gpu_config *cfg, int quiet)
 {
     // Check for at least one CUDA device before doing anything else.
     // Return -1 silently so main() falls back to CPU without a scary error.
     int dev_count = 0;
     if (cudaGetDeviceCount(&dev_count) != cudaSuccess || dev_count == 0)
         return -1;
+    if (device_idx < 0 || device_idx >= dev_count)
+        return -1;
 
-    // Enable mapped pinned memory (needed for zero-copy result ring buffer)
+    // Bind this thread to the requested device before anything else, then
+    // enable mapped pinned memory (per-device flag — must be set before
+    // this device's context is created).
+    CUDA_CHECK(cudaSetDevice(device_idx));
     CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceMapHost));
 
     cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device_idx));
 
     if (!quiet) {
-        fprintf(stderr, "GPU: %s (sm_%d%d, %d SMs, %zu MB)\n",
-                prop.name, prop.major, prop.minor,
+        fprintf(stderr, "GPU %d: %s (sm_%d%d, %d SMs, %zu MB)\n",
+                device_idx, prop.name, prop.major, prop.minor,
                 prop.multiProcessorCount,
                 (size_t)(prop.totalGlobalMem >> 20));
     }
@@ -134,6 +147,11 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
                 if (!quiet)
                     fprintf(stderr, "MKP_BATCHNUM=%d ignored: needs more than the %zu MB VRAM budget; using %d\n",
                             v, (size_t)(vram_budget >> 20), batchnum);
+            } else if ((size_t)v * 20 * (size_t)total_threads > (size_t)0x7FFFFFFF) {
+                // Same int32 kernel-index cap as the auto-pick above.
+                if (!quiet)
+                    fprintf(stderr, "MKP_BATCHNUM=%d ignored: would overflow int32 kernel index (total_threads=%d); using %d\n",
+                            v, total_threads, batchnum);
             } else {
                 batchnum = v;
             }

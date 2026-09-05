@@ -305,12 +305,21 @@ template __global__ void worker_cuda_kernel<256>(struct kernel_args);
 template __global__ void worker_cuda_kernel<512>(struct kernel_args);
 template __global__ void worker_cuda_kernel<1024>(struct kernel_args);
 
+// ── Multi-GPU shared state ────────────────────────────────────────────────
+// Array of per-device gpu_states, populated by gpu_worker_launch(). The
+// primary drain thread reads all devices' h_numcalc to report an aggregated
+// throughput number; every other CUDA-side call always operates on its own
+// gpu_state via drain_args / gpu_worker_ctx.
+static struct gpu_state *g_gpu_states = NULL;
+static int               g_gpu_state_count = 0;
+
 // ── CPU-side drain thread ──────────────────────────────────────────────────
 // Polls the result ring buffer and calls onionready() for each found key.
 
 struct drain_args {
     struct gpu_state *st;
     int quiet;
+    int is_primary;      // 1 = this thread also reports aggregated stats
 #ifdef STATISTICS
     u64 reportdelay;
     int realtimestats;
@@ -383,14 +392,28 @@ static void *drain_thread(void *arg)
         nanosleep(&ts, 0);
 
 #ifdef STATISTICS
-        if (da->reportdelay) {
+        // Only the primary drain thread reports stats (aggregated across all
+        // devices), otherwise multi-GPU would print one line per device.
+        if (da->is_primary && da->reportdelay) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             inowtime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
 
-            u64 cur_calc = (u64)*st->h_numcalc;
-            sumcalc    += cur_calc - last_numcalc;
-            last_numcalc = cur_calc;
+            u64 cur_calc = 0;
+            for (int i = 0; i < g_gpu_state_count; i++) {
+                if (g_gpu_states[i].h_numcalc)
+                    cur_calc += (u64)*g_gpu_states[i].h_numcalc;
+            }
+            if (!ireporttime) {
+                // First tick: align to whatever kernels have already produced
+                // during their startup so the initial reporting window covers
+                // real work instead of blowing up on a tiny elapsed window.
+                last_numcalc = cur_calc;
+                istarttime   = inowtime;
+            } else {
+                sumcalc     += cur_calc - last_numcalc;
+                last_numcalc = cur_calc;
+            }
 
             if (!ireporttime || (i64)(inowtime - ireporttime) >= (i64)da->reportdelay) {
                 if (ireporttime)
@@ -417,12 +440,16 @@ static void *drain_thread(void *arg)
     }
 
 #ifdef STATISTICS
-    {
+    if (da->is_primary) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         inowtime = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000;
         u64 elapsed = inowtime - istarttime + elapsedoffset;
-        u64 total_calc = (u64)*st->h_numcalc;
+        u64 total_calc = 0;
+        for (int i = 0; i < g_gpu_state_count; i++) {
+            if (g_gpu_states[i].h_numcalc)
+                total_calc += (u64)*g_gpu_states[i].h_numcalc;
+        }
         double calcpersec = elapsed ? 1000000.0 * (double)total_calc / elapsed : 0.0;
         print_stats_line(stderr, calcpersec, elapsed, (u64)keysgenerated);
     }
@@ -508,47 +535,63 @@ static int upload_filters(void)
     return 0;
 }
 
-extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
-{
-#ifndef STATISTICS
-    (void)reportdelay; (void)realtimestats;
+// Per-device worker context passed to gpu_worker_thread().
+struct gpu_worker_ctx {
+    int device_idx;
+    int is_primary;
+    int quiet;
+#ifdef STATISTICS
+    u64 reportdelay;
+    int realtimestats;
 #endif
-    static struct gpu_state st;
-    memset(&st, 0, sizeof(st));
+    int result;   // 0 on success, -1 on error
+};
 
-    // Auto-configure GPU — returns -1 silently if no device found
-    if (gpu_autoconf(&st.cfg, quiet) < 0)
-        return -1;
+// Per-device worker thread: binds to its device, initialises it, launches
+// the persistent kernel, drains results, cleans up. Every CUDA call in this
+// thread implicitly uses the device set by cudaSetDevice(device_idx).
+static void *gpu_worker_thread(void *arg)
+{
+    struct gpu_worker_ctx *ctx = (struct gpu_worker_ctx *)arg;
+    struct gpu_state *st = &g_gpu_states[ctx->device_idx];
+    memset(st, 0, sizeof(*st));
+    ctx->result = -1;
 
-    if (!quiet)
-        fprintf(stderr, "using GPU acceleration\n");
+    // gpu_autoconf() calls cudaSetDevice internally, but we also do it here
+    // so a mid-init failure that returns early still leaves the thread
+    // pointing at the intended device (helps if we later free per-device
+    // allocations from a shared teardown path).
+    if (cudaSetDevice(ctx->device_idx) != cudaSuccess) return NULL;
 
-    // Initialize device memory and starting points
-    if (gpu_init(&st, quiet) < 0) return -1;
+    if (gpu_autoconf(ctx->device_idx, &st->cfg, ctx->quiet) < 0) return NULL;
 
-    // Upload filter table to constant memory
-    if (upload_filters() < 0) { gpu_cleanup(&st); return -1; }
+    if (gpu_init(st, ctx->quiet) < 0) return NULL;
 
-    // Upload skprefix to constant memory (used by the kernel to build the
-    // emitted secret). pkprefix/checksumstr are no longer needed on the GPU —
-    // the CPU drain thread formats the public key on a match.
-    CUDA_CHECK_LAUNCH(cudaMemcpyToSymbol(cuda_skprefix, skprefix, 32));
+    // Constant-memory symbols (filter table, skprefix) live in the current
+    // device's context — must be uploaded per device, after cudaSetDevice.
+    if (upload_filters() < 0) { gpu_cleanup(st); return NULL; }
+    cudaError_t e = cudaMemcpyToSymbol(cuda_skprefix, skprefix, 32);
+    if (e != cudaSuccess) {
+        fprintf(stderr, "CUDA error uploading skprefix on device %d: %s\n",
+                ctx->device_idx, cudaGetErrorString(e));
+        gpu_cleanup(st); return NULL;
+    }
 
     // Build kernel_args
     struct kernel_args kargs;
     memset(&kargs, 0, sizeof(kargs));
-    kargs.batch_xyz        = st.d_batch_xyz;
-    kargs.tmp              = st.d_tmp;
-    kargs.start_pts        = st.d_start_pts;
-    kargs.start_sk         = st.d_start_sk;
-    kargs.result_head      = st.d_result_head;
-    kargs.results          = st.d_results;
-    kargs.done             = st.d_done;
-    kargs.result_ring_size = st.result_ring_size;
-    kargs.stride           = st.cfg.num_blocks * st.cfg.threads_per_block;
+    kargs.batch_xyz        = st->d_batch_xyz;
+    kargs.tmp              = st->d_tmp;
+    kargs.start_pts        = st->d_start_pts;
+    kargs.start_sk         = st->d_start_sk;
+    kargs.result_head      = st->d_result_head;
+    kargs.results          = st->d_results;
+    kargs.done             = st->d_done;
+    kargs.result_ring_size = st->result_ring_size;
+    kargs.stride           = st->cfg.num_blocks * st->cfg.threads_per_block;
     kargs.numwords         = numwords;
-    kargs.endwork_flag     = st.d_endwork;
-    kargs.numcalc          = st.d_numcalc;
+    kargs.endwork_flag     = st->d_endwork;
+    kargs.numcalc          = st->d_numcalc;
 
     // Profiling hook: MKP_PROFILE_ITERS=N makes the persistent kernel exit
     // after ~N candidates/thread so tools that replay/await the kernel
@@ -558,35 +601,40 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
         const char *pi = getenv("MKP_PROFILE_ITERS");
         if (pi && *pi) {
             kargs.max_iters = strtoull(pi, NULL, 10);
-            if (!quiet && kargs.max_iters)
+            if (!ctx->quiet && kargs.max_iters && ctx->is_primary)
                 fprintf(stderr, "PROFILE: kernel will stop after %llu candidates/thread\n",
                         kargs.max_iters);
         }
     }
 
     // Start CPU drain thread
-    struct drain_args da = { &st, quiet
+    struct drain_args da = { st, ctx->quiet, ctx->is_primary
 #ifdef STATISTICS
-        , reportdelay, realtimestats
+        , ctx->reportdelay, ctx->realtimestats
 #endif
     };
     pthread_t drain;
     if (pthread_create(&drain, NULL, drain_thread, &da) != 0) {
-        fprintf(stderr, "failed to create GPU drain thread\n");
-        gpu_cleanup(&st); return -1;
+        fprintf(stderr, "failed to create GPU drain thread for device %d\n",
+                ctx->device_idx);
+        gpu_cleanup(st); return NULL;
     }
 
     // Launch kernel with correct BATCHNUM template
-    int G = st.cfg.num_blocks, T = st.cfg.threads_per_block;
-    switch (st.cfg.batchnum) {
+    int G = st->cfg.num_blocks, T = st->cfg.threads_per_block;
+    switch (st->cfg.batchnum) {
         case   64: worker_cuda_kernel<  64><<<G, T>>>(kargs); break;
         case  128: worker_cuda_kernel< 128><<<G, T>>>(kargs); break;
         case  256: worker_cuda_kernel< 256><<<G, T>>>(kargs); break;
         case  512: worker_cuda_kernel< 512><<<G, T>>>(kargs); break;
         case 1024: worker_cuda_kernel<1024><<<G, T>>>(kargs); break;
         default:
-            fprintf(stderr, "invalid batchnum %d\n", st.cfg.batchnum);
-            gpu_cleanup(&st); return -1;
+            fprintf(stderr, "invalid batchnum %d on device %d\n",
+                    st->cfg.batchnum, ctx->device_idx);
+            endwork = 1;  // wake drain, which will exit
+            pthread_join(drain, 0);
+            gpu_cleanup(st);
+            return NULL;
     }
 
     // Wait for kernel to finish (endwork=1 causes kernel to return)
@@ -597,9 +645,81 @@ extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
     if (kargs.max_iters)
         endwork = 1;
 
-    // Wait for drain thread to finish
     pthread_join(drain, 0);
+    gpu_cleanup(st);
+    ctx->result = 0;
+    return NULL;
+}
 
-    gpu_cleanup(&st);
-    return 0;
+// Orchestrator: detects all CUDA devices, spawns one worker thread per
+// device, and joins them. Every device runs the same persistent kernel with
+// its own state; the primary device's drain thread reports aggregated stats.
+// The global `endwork` (set by main.c's signal handler or shutdown) stops
+// every device at once.
+extern "C" int gpu_worker_launch(int quiet, u64 reportdelay, int realtimestats)
+{
+#ifndef STATISTICS
+    (void)reportdelay; (void)realtimestats;
+#endif
+
+    int dev_count = gpu_device_count();
+    if (dev_count <= 0) return -1;
+
+    // MKP_GPUS=N caps the number of devices used (useful when one card is
+    // busy with something else). Silently clamps to [1, dev_count].
+    {
+        const char *g = getenv("MKP_GPUS");
+        if (g && *g) {
+            int v = atoi(g);
+            if (v >= 1 && v < dev_count) dev_count = v;
+        }
+    }
+
+    if (!quiet)
+        fprintf(stderr, "using GPU acceleration on %d device%s\n",
+                dev_count, dev_count == 1 ? "" : "s");
+
+    g_gpu_states = (struct gpu_state *)calloc((size_t)dev_count, sizeof(struct gpu_state));
+    if (!g_gpu_states) { fprintf(stderr, "gpu_worker_launch: OOM\n"); return -1; }
+    g_gpu_state_count = dev_count;
+
+    struct gpu_worker_ctx *ctxs =
+        (struct gpu_worker_ctx *)calloc((size_t)dev_count, sizeof(*ctxs));
+    pthread_t *threads = (pthread_t *)calloc((size_t)dev_count, sizeof(pthread_t));
+    if (!ctxs || !threads) {
+        free(ctxs); free(threads);
+        free(g_gpu_states); g_gpu_states = NULL; g_gpu_state_count = 0;
+        return -1;
+    }
+
+    int started = 0;
+    for (int i = 0; i < dev_count; i++) {
+        ctxs[i].device_idx    = i;
+        ctxs[i].is_primary    = (i == 0);
+        ctxs[i].quiet         = quiet;
+#ifdef STATISTICS
+        ctxs[i].reportdelay   = reportdelay;
+        ctxs[i].realtimestats = realtimestats;
+#endif
+        if (pthread_create(&threads[i], NULL, gpu_worker_thread, &ctxs[i]) != 0) {
+            fprintf(stderr, "failed to create GPU worker thread for device %d\n", i);
+            endwork = 1;  // signal already-started threads to stop
+            break;
+        }
+        started++;
+    }
+
+    int overall = 0;
+    for (int i = 0; i < started; i++) {
+        pthread_join(threads[i], NULL);
+        if (ctxs[i].result < 0) overall = -1;
+    }
+    if (started < dev_count) overall = -1;
+
+    free(ctxs);
+    free(threads);
+    free(g_gpu_states);
+    g_gpu_states = NULL;
+    g_gpu_state_count = 0;
+    return overall;
 }

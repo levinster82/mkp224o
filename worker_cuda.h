@@ -61,8 +61,12 @@ struct gpu_result {
     uint8_t secret[GPU_RESULT_SECRET_LEN];
 };
 
-// Query GPU and compute configuration
-int gpu_autoconf(struct gpu_config *cfg, int quiet);
+// Number of available CUDA devices (0 if none / on error).
+int gpu_device_count(void);
+
+// Query GPU `device_idx` and compute its configuration. Also binds the calling
+// thread to that device (cudaSetDevice) and enables mapped pinned memory.
+int gpu_autoconf(int device_idx, struct gpu_config *cfg, int quiet);
 
 // Allocate device memory, copy ge_eightpoint to __constant__, fill start_pts
 int gpu_init(struct gpu_state *st, int quiet);
