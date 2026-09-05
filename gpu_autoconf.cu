@@ -60,23 +60,36 @@ static int clamp_pow2(int n, int lo, int hi)
     return p;
 }
 
-extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
+extern "C" int gpu_device_count(void)
+{
+    int dev_count = 0;
+    if (cudaGetDeviceCount(&dev_count) != cudaSuccess)
+        return 0;
+    return dev_count;
+}
+
+extern "C" int gpu_autoconf(int device_idx, struct gpu_config *cfg, int quiet)
 {
     // Check for at least one CUDA device before doing anything else.
     // Return -1 silently so main() falls back to CPU without a scary error.
     int dev_count = 0;
     if (cudaGetDeviceCount(&dev_count) != cudaSuccess || dev_count == 0)
         return -1;
+    if (device_idx < 0 || device_idx >= dev_count)
+        return -1;
 
-    // Enable mapped pinned memory (needed for zero-copy result ring buffer)
+    // Bind this thread to the requested device before anything else, then
+    // enable mapped pinned memory (per-device flag — must be set before
+    // this device's context is created).
+    CUDA_CHECK(cudaSetDevice(device_idx));
     CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceMapHost));
 
     cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device_idx));
 
     if (!quiet) {
-        fprintf(stderr, "GPU: %s (sm_%d%d, %d SMs, %zu MB)\n",
-                prop.name, prop.major, prop.minor,
+        fprintf(stderr, "GPU %d: %s (sm_%d%d, %d SMs, %zu MB)\n",
+                device_idx, prop.name, prop.major, prop.minor,
                 prop.multiProcessorCount,
                 (size_t)(prop.totalGlobalMem >> 20));
     }
@@ -99,7 +112,23 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
     size_t max_batchnum = vram_budget / ((size_t)total_threads * bytes_per_thread_per_slot);
     if (max_batchnum < 1) max_batchnum = 1;
 
-    int batchnum = clamp_pow2((int)max_batchnum, 64, 1024);
+    // The kernel indexes d_batch_xyz as slot*20*total_threads + ... using
+    // int32 arithmetic; the largest valid index must fit in INT32_MAX.
+    // On high-VRAM cards (e.g. RTX 4090 24 GB, 128 SMs) the VRAM-based
+    // max_batchnum can exceed this — silent kernel death with illegal
+    // memory access. Cap by the index limit too.
+    size_t max_batchnum_by_index =
+        (size_t)0x7FFFFFFF / ((size_t)20 * (size_t)total_threads);
+    if (max_batchnum > max_batchnum_by_index)
+        max_batchnum = max_batchnum_by_index;
+    if (max_batchnum < 1) max_batchnum = 1;
+
+    // Pick the largest instantiated batchnum (∈ {64,128,256,512,1024}) that
+    // fits in max_batchnum. Must floor (never round up), otherwise we'd
+    // exceed either the VRAM budget or the int32 index cap above.
+    int batchnum = 1024;
+    while (batchnum > 64 && (size_t)batchnum > max_batchnum)
+        batchnum >>= 1;
 
     // Experiment knob: MKP_BATCHNUM=64|128|256|512|1024 overrides the
     // capacity-based auto pick so we can tune the memory/compute tradeoff
@@ -118,6 +147,11 @@ extern "C" int gpu_autoconf(struct gpu_config *cfg, int quiet)
                 if (!quiet)
                     fprintf(stderr, "MKP_BATCHNUM=%d ignored: needs more than the %zu MB VRAM budget; using %d\n",
                             v, (size_t)(vram_budget >> 20), batchnum);
+            } else if ((size_t)v * 20 * (size_t)total_threads > (size_t)0x7FFFFFFF) {
+                // Same int32 kernel-index cap as the auto-pick above.
+                if (!quiet)
+                    fprintf(stderr, "MKP_BATCHNUM=%d ignored: would overflow int32 kernel index (total_threads=%d); using %d\n",
+                            v, total_threads, batchnum);
             } else {
                 batchnum = v;
             }
